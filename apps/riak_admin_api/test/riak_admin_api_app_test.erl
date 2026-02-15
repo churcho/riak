@@ -15,7 +15,7 @@
 %%% ============================================================
 
 port_calculation_test_() ->
-    %% Verify the formula: 10000 + N * 10 + 5
+    %% Verify the formula: 10000 + N * 10 + 5 (admin API port)
     [
         ?_assertEqual(10015, 10000 + 1 * 10 + 5),
         ?_assertEqual(10025, 10000 + 2 * 10 + 5),
@@ -25,6 +25,15 @@ port_calculation_test_() ->
         ?_assertEqual(10065, 10000 + 6 * 10 + 5),
         ?_assertEqual(10075, 10000 + 7 * 10 + 5),
         ?_assertEqual(10085, 10000 + 8 * 10 + 5)
+    ].
+
+riak_http_port_calculation_test_() ->
+    %% Verify the formula: 10000 + N * 10 + 8 (Riak HTTP port in devrel)
+    [
+        ?_assertEqual(10018, 10000 + 1 * 10 + 8),
+        ?_assertEqual(10028, 10000 + 2 * 10 + 8),
+        ?_assertEqual(10038, 10000 + 3 * 10 + 8),
+        ?_assertEqual(10048, 10000 + 4 * 10 + 8)
     ].
 
 port_regex_devnode_test() ->

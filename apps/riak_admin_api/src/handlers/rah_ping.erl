@@ -27,6 +27,7 @@
 %% Returns a 200 JSON response with the node name and status.
 %% Uses riak_admin_api_handler:json_reply/3 for consistent
 %% response formatting across all endpoints.
+-spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     Req = riak_admin_api_handler:json_reply(200,
         #{status => <<"ok">>, node => node()}, Req0),

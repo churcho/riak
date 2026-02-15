@@ -20,6 +20,7 @@
 -export([init/2]).
 
 %% @doc Cowboy handler callback — returns partition-to-node mapping.
+-spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     case riak_admin_api_riak:ring_ownership() of
         {ok, Data} ->

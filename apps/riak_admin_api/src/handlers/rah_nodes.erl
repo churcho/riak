@@ -28,6 +28,7 @@
 -export([init/2]).
 
 %% @doc Cowboy handler callback — returns stats for the requested node.
+-spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     NodeBin = cowboy_req:binding(node, Req0),
     try binary_to_existing_atom(NodeBin, utf8) of

@@ -23,6 +23,7 @@
 -export([init/2]).
 
 %% @doc Cowboy handler callback — returns cluster membership and health.
+-spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     case riak_admin_api_riak:cluster_status() of
         {ok, Data} ->

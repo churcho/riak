@@ -19,6 +19,7 @@
 -export([init/2]).
 
 %% @doc Cowboy handler callback — returns AAE exchange information.
+-spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     case riak_admin_api_riak:aae_status() of
         {ok, Exchanges} ->

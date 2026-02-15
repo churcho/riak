@@ -32,6 +32,8 @@
 %%
 %% Encodes `Data' (an Erlang map or list) as JSON and replies with
 %% the given HTTP status code and application/json content type.
+-spec json_reply(non_neg_integer(), jsx:json_term(), cowboy_req:req()) ->
+    cowboy_req:req().
 json_reply(StatusCode, Data, Req) ->
     Body = jsx:encode(Data),
     cowboy_req:reply(StatusCode,
@@ -43,6 +45,8 @@ json_reply(StatusCode, Data, Req) ->
 %% Always returns `{"error": "...", "reason": "..."}` so clients
 %% can reliably parse error responses regardless of which endpoint
 %% produced them.
+-spec error_reply(non_neg_integer(), binary(), binary(), cowboy_req:req()) ->
+    cowboy_req:req().
 error_reply(StatusCode, Error, Reason, Req) ->
     json_reply(StatusCode,
         #{error => Error, reason => Reason}, Req).

@@ -49,8 +49,32 @@
 -endif.
 
 %% @doc Start the admin API HTTP server and supervisor tree.
+%%
+%% Startup sequence:
+%% 1. Configure syn event handler (must happen before scope init)
+%% 2. Initialize syn scope (creates local ETS tables)
+%% 3. Resolve HTTP port and start Cowboy listener
+%% 4. Start supervisor tree (which starts the coordinator)
+-spec start(term(), term()) ->
+    {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
+    %% Configure syn event handler before initializing scope.
+    %% Must happen before syn:add_node_to_scopes/1.
+    application:set_env(syn, event_handler, riak_admin_event_handler),
+
+    %% Initialize syn scope. Creates local ETS tables for the
+    %% riak_admin scope. Must complete before coordinator starts.
+    syn:add_node_to_scopes([riak_admin]),
+
     Port = resolve_port(),
+    RiakHttpPort = resolve_riak_http_port(),
+
+    %% Write the resolved ports back to application env so that
+    %% riak_admin_api_coordinator reads the actual listener ports
+    %% (not the defaults) in devrel. Without this, syn metadata
+    %% advertises the wrong ports.
+    application:set_env(riak_admin_api, http_port, Port),
+    application:set_env(riak_admin_api, riak_http_port, RiakHttpPort),
 
     Dispatch = cowboy_router:compile([
         {'_', routes()}
@@ -61,16 +85,28 @@ start(_StartType, _StartArgs) ->
             [{port, Port}],
             #{env => #{dispatch => Dispatch}}) of
         {ok, _Pid} ->
-            logger:info("riak_admin_api started on port ~B", [Port]),
-            riak_admin_api_sup:start_link();
+            logger:info("[riak_admin] API started on port ~B", [Port]),
+            case riak_admin_api_sup:start_link() of
+                {ok, SupPid} ->
+                    {ok, SupPid};
+                {error, SupReason} ->
+                    %% Supervisor failed — stop the listener so the
+                    %% port is freed for the next startup attempt.
+                    %% OTP does NOT call stop/1 when start/2 fails.
+                    cowboy:stop_listener(riak_admin_http),
+                    logger:error("[riak_admin] Supervisor failed: ~p "
+                                 "(listener cleaned up)", [SupReason]),
+                    {error, SupReason}
+            end;
         {error, Reason} ->
             logger:error(
-                "riak_admin_api failed to start on port ~B: ~p",
+                "[riak_admin] API failed to start on port ~B: ~p",
                 [Port, Reason]),
             {error, Reason}
     end.
 
 %% @doc Stop the admin API HTTP server.
+-spec stop(term()) -> ok.
 stop(_State) ->
     cowboy:stop_listener(riak_admin_http),
     ok.
@@ -93,6 +129,7 @@ stop(_State) ->
 %%
 %% In production (single node, non-devN name), the configured
 %% default (8099) is used.
+-spec resolve_port() -> pos_integer().
 resolve_port() ->
     Default = application:get_env(riak_admin_api, http_port, 8099),
     case node() of
@@ -109,6 +146,29 @@ resolve_port() ->
             end
     end.
 
+%% @doc Resolve the Riak HTTP port for this node.
+%%
+%% In a devrel, each node uses port 100N8 (dev1=10018, dev2=10028).
+%% In production, the configured default (8098) is used.
+%% This value is stored in syn metadata so dashboards know how to
+%% reach the Riak HTTP API on each node.
+-spec resolve_riak_http_port() -> pos_integer().
+resolve_riak_http_port() ->
+    Default = application:get_env(riak_admin_api, riak_http_port, 8098),
+    case node() of
+        nonode@nohost ->
+            Default;
+        Node ->
+            NodeStr = atom_to_list(Node),
+            case re:run(NodeStr, "^dev([0-9]+)@", [{capture, [1], list}]) of
+                {match, [NStr]} ->
+                    N = list_to_integer(NStr),
+                    10000 + N * 10 + 8;
+                nomatch ->
+                    Default
+            end
+    end.
+
 %% @doc All API routes in one place.
 %%
 %% Each route maps a URL path to a handler module. Handlers are
@@ -118,15 +178,16 @@ resolve_port() ->
 %% Handler naming: all handlers use the `rah_' prefix (Riak Admin
 %% Handler) to keep dispatch rules concise and avoid collisions
 %% with Riak's existing modules.
+-spec routes() -> [cowboy_router:route_path()].
 routes() ->
     [
         {"/api/ping",              rah_ping, []},
         {"/api/cluster/status",    rah_cluster, []},
+        {"/api/dcs",               rah_dcs, []},
         {"/api/ring/ownership",    rah_ring, []},
         {"/api/nodes/:node/stats", rah_nodes, []},
         {"/api/handoff/status",    rah_handoff, []},
         {"/api/aae/status",        rah_aae, []}
-        %% M3: {"/api/dcs",                       rah_dcs, []}
         %% M7: {"/api/kv/:type/:bucket/:key",     rah_kv, []}
         %% M7: {"/api/bucket-types",              rah_bucket_types, []}
         %% M8: {"/api/stream/events",             rah_events_ws, []}
