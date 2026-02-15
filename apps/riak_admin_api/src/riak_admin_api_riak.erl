@@ -1,0 +1,318 @@
+%% @doc Gateway module: ALL calls to riak_core, riak_kv, and
+%% riak_object go through this module exclusively.
+%%
+%% No other module in riak_admin_api may call Riak internals
+%% directly. This is the cornerstone of the isolation pattern
+%% that makes the admin API extractable to its own repository.
+%%
+%% == Why this matters ==
+%%
+%% <ul>
+%%   <li>The .app.src never lists riak_core or riak_kv as
+%%       dependencies — they are resolved at runtime only.</li>
+%%   <li>`rebar3 compile' works without Riak source present
+%%       (Erlang resolves module calls at runtime, not compile
+%%       time).</li>
+%%   <li>Every handler is testable in isolation — swap this
+%%       gateway for a mock and Cowboy still works.</li>
+%%   <li>Extraction to a standalone repo is mechanical: copy
+%%       the directory, change path to git in Riak's
+%%       rebar.config, done.</li>
+%% </ul>
+%%
+%% == Isolation check ==
+%%
+%% Run this before every commit to verify no leaks:
+%% ```
+%% grep -rn "riak_core\|riak_kv\|riak_object\|riak:local" src/ \
+%%   | grep -v riak_admin_api_riak.erl
+%% '''
+%% Should return zero results.
+%%
+%% == Error handling ==
+%%
+%% Every public function returns {ok, Data} | {error, Reason}.
+%% Exceptions from Riak internals are caught and wrapped so that
+%% handlers never see raw crashes — they get a clean error tuple
+%% to format into an HTTP 500 response.
+
+-module(riak_admin_api_riak).
+
+-export([
+    cluster_status/0,
+    ring_ownership/0,
+    node_stats/1,
+    handoff_status/0,
+    aae_status/0
+]).
+
+%% Exported so remote nodes can call it via rpc:call/4.
+%% When a handler requests stats for a remote node, node_stats/1
+%% does rpc:call(RemoteNode, ?MODULE, collect_local_stats, []).
+%% This function must be exported for that to work.
+-export([collect_local_stats/0]).
+
+-ifdef(TEST).
+-export([
+    to_bin/1,
+    round_pct/2,
+    format_pending/1,
+    format_transfers/1,
+    format_exchanges/1
+]).
+-endif.
+
+%%% ============================================================
+%%% Cluster Status
+%%% ============================================================
+
+%% @doc Return cluster membership, ring size, and node health.
+%%
+%% Calls riak_core_ring_manager to get the current ring, then
+%% extracts membership, partition ownership counts, and node
+%% reachability. The returned map matches the JSON contract that
+%% the rah_cluster handler sends to clients.
+%%
+%% For each node, ring_pct is calculated as the percentage of
+%% partitions owned by that node. Reachable is determined by
+%% net_adm:ping/1 (fine for small clusters; consider caching
+%% for large ones).
+cluster_status() ->
+    try
+        {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+        Members = riak_core_ring:all_members(Ring),
+        MemberStatus = riak_core_ring:all_member_status(Ring),
+        Owners = riak_core_ring:all_owners(Ring),
+        NumPartitions = riak_core_ring:num_partitions(Ring),
+
+        %% Count partitions per node for ring_pct calculation
+        OwnerCounts = lists:foldl(
+            fun({_Idx, Node}, Acc) ->
+                maps:update_with(Node, fun(C) -> C + 1 end, 1, Acc)
+            end, #{}, Owners),
+
+        Nodes = lists:map(
+            fun(Node) ->
+                Status = proplists:get_value(Node, MemberStatus, unknown),
+                Count = maps:get(Node, OwnerCounts, 0),
+                Pct = round_pct(Count, NumPartitions),
+                Reachable = net_adm:ping(Node) =:= pong,
+                #{name => Node, status => Status,
+                  ring_pct => Pct, reachable => Reachable}
+            end, Members),
+
+        {ok, #{
+            cluster_name => to_bin(riak_core_ring:cluster_name(Ring)),
+            ring_size => NumPartitions,
+            claimant => riak_core_ring:claimant(Ring),
+            nodes => Nodes,
+            pending_changes => format_pending(
+                riak_core_ring:pending_changes(Ring)),
+            ready => (riak_core_ring:pending_changes(Ring) =:= [])
+        }}
+    catch
+        Class:Reason:Stack ->
+            logger:error("cluster_status failed: ~p:~p~n~p",
+                         [Class, Reason, Stack]),
+            {error, {Class, Reason}}
+    end.
+
+%%% ============================================================
+%%% Ring Ownership
+%%% ============================================================
+
+%% @doc Return the full partition-to-node mapping of the ring.
+%%
+%% Calls riak_core_ring:all_owners/1 to get the list of
+%% {HashIndex, Node} tuples. Each partition gets a sequential
+%% index (for TUI rendering) and retains the raw hash (the
+%% position on the 2^160 ring) for potential key-to-partition
+%% mapping later.
+%%
+%% node_colors assigns each member a sequential integer for use
+%% as a colour index in visualisations.
+ring_ownership() ->
+    try
+        {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+        Owners = riak_core_ring:all_owners(Ring),
+        Members = riak_core_ring:all_members(Ring),
+        NumPartitions = riak_core_ring:num_partitions(Ring),
+
+        NodeColors = maps:from_list(
+            lists:zip(Members, lists:seq(0, length(Members) - 1))),
+
+        {Partitions, _} = lists:foldl(
+            fun({HashIdx, Node}, {Acc, Seq}) ->
+                Entry = #{index => Seq, hash => HashIdx, node => Node},
+                {[Entry | Acc], Seq + 1}
+            end, {[], 0}, Owners),
+
+        {ok, #{
+            num_partitions => NumPartitions,
+            partitions => lists:reverse(Partitions),
+            node_colors => NodeColors
+        }}
+    catch
+        Class:Reason:Stack ->
+            logger:error("ring_ownership failed: ~p:~p~n~p",
+                         [Class, Reason, Stack]),
+            {error, {Class, Reason}}
+    end.
+
+%%% ============================================================
+%%% Node Stats
+%%% ============================================================
+
+%% @doc Return stats for a specific node.
+%%
+%% For the local node, calls collect_local_stats/0 directly.
+%% For remote nodes, uses rpc:call/4 with a 5-second timeout.
+%% The remote node must have riak_admin_api loaded (which it
+%% will, since all nodes run the same release).
+node_stats(Node) when Node =:= node() ->
+    {ok, collect_local_stats()};
+node_stats(Node) ->
+    case rpc:call(Node, ?MODULE, collect_local_stats, [], 5000) of
+        {badrpc, Reason} -> {error, {unreachable, Reason}};
+        Stats when is_map(Stats) -> {ok, Stats};
+        Other -> {error, {unexpected, Other}}
+    end.
+
+%% @doc Collect stats from the local node.
+%%
+%% Returns a map with two sections:
+%% - erlang: OTP version, process count, memory breakdown, run queue
+%%   (always available — these are pure Erlang/OTP calls)
+%% - kv: vnode gets/puts, node gets/puts, read repairs, FSM latencies
+%%   (sourced from riak_kv_status; wrapped in try/catch so the API
+%%   still works even if riak_kv hasn't fully started)
+%%
+%% Exported because remote nodes call this via rpc:call/4 from
+%% node_stats/1.
+collect_local_stats() ->
+    Mem = erlang:memory(),
+    KV = try riak_kv_status:statistics() catch _:_ -> [] end,
+    #{
+        node => node(),
+        erlang => #{
+            otp_release => list_to_binary(erlang:system_info(otp_release)),
+            process_count => erlang:system_info(process_count),
+            memory_total_mb => pv(total, Mem) div (1024 * 1024),
+            memory_processes_mb => pv(processes, Mem) div (1024 * 1024),
+            memory_ets_mb => pv(ets, Mem) div (1024 * 1024),
+            run_queue => erlang:statistics(run_queue)
+        },
+        kv => #{
+            vnode_gets => pv(vnode_gets, KV),
+            vnode_puts => pv(vnode_puts, KV),
+            node_gets => pv(node_gets_total, KV),
+            node_puts => pv(node_puts_total, KV),
+            read_repairs => pv(read_repairs_total, KV),
+            node_get_fsm_time_mean => pv(node_get_fsm_time_mean, KV),
+            node_put_fsm_time_mean => pv(node_put_fsm_time_mean, KV)
+        }
+    }.
+
+%%% ============================================================
+%%% Handoff Status
+%%% ============================================================
+
+%% @doc Return active handoff transfers.
+%%
+%% Calls riak_core_handoff_manager:status/0. The return type
+%% varies between Riak versions, so format_transfers/1 uses a
+%% defensive approach: known tuple shapes are destructured into
+%% clean maps; unknown shapes are stringified as a safe fallback.
+handoff_status() ->
+    try
+        Raw = riak_core_handoff_manager:status(),
+        {ok, format_transfers(Raw)}
+    catch
+        Class:Reason:Stack ->
+            logger:error("handoff_status failed: ~p:~p~n~p",
+                         [Class, Reason, Stack]),
+            {error, {Class, Reason}}
+    end.
+
+%%% ============================================================
+%%% AAE (Active Anti-Entropy) Status
+%%% ============================================================
+
+%% @doc Return AAE exchange information.
+%%
+%% Calls riak_kv_entropy_info:compute_exchange_info/0. Like
+%% handoff, the return structure varies between versions, so
+%% format_exchanges/1 uses the same defensive pattern: known
+%% shapes get proper maps, unknown shapes get stringified.
+aae_status() ->
+    try
+        Raw = riak_kv_entropy_info:compute_exchange_info(),
+        {ok, format_exchanges(Raw)}
+    catch
+        Class:Reason:Stack ->
+            logger:error("aae_status failed: ~p:~p~n~p",
+                         [Class, Reason, Stack]),
+            {error, {Class, Reason}}
+    end.
+
+%%% ============================================================
+%%% Internal helpers
+%%% ============================================================
+
+%% @private Proplists:get_value shorthand, defaults to 0.
+pv(K, PL) -> proplists:get_value(K, PL, 0).
+
+%% @private Calculate ring percentage, rounded to 2 decimal places.
+%% Avoids long floating-point representations like 33.33333333333333
+%% in JSON output.
+round_pct(_Count, 0) -> 0.0;
+round_pct(Count, Total) ->
+    erlang:round((Count / Total) * 10000) / 100.
+
+%% @private Convert any Erlang term to a binary safe for jsx.
+%% Riak internals often return charlists (e.g., cluster_name)
+%% which jsx cannot encode. This helper normalises them.
+to_bin(V) when is_binary(V) -> V;
+to_bin(V) when is_atom(V) -> atom_to_binary(V, utf8);
+to_bin(V) when is_list(V) -> list_to_binary(V);
+to_bin(V) -> iolist_to_binary(io_lib:format("~p", [V])).
+
+%% @private Simplify pending_changes tuples for JSON encoding.
+%% pending_changes returns complex tuples that jsx cannot encode
+%% directly, so we stringify them as a safe fallback.
+format_pending([]) -> [];
+format_pending(Changes) when is_list(Changes) ->
+    lists:map(fun(Change) ->
+        iolist_to_binary(io_lib:format("~p", [Change]))
+    end, Changes);
+format_pending(_) -> [].
+
+%% @private Format handoff transfer status for JSON.
+format_transfers(Status) when is_list(Status) ->
+    lists:filtermap(fun format_one_transfer/1, Status);
+format_transfers(_) ->
+    [].
+
+%% @private Destructure a single transfer entry.
+%% The exact tuple shape depends on the Riak build. Start with
+%% a safe string fallback, then refine as real shapes are observed.
+format_one_transfer(T) when is_tuple(T) ->
+    {true, #{raw => iolist_to_binary(io_lib:format("~p", [T]))}};
+format_one_transfer(T) when is_map(T) ->
+    {true, T};
+format_one_transfer(_) ->
+    false.
+
+%% @private Format AAE exchange entries for JSON.
+format_exchanges(Exchanges) when is_list(Exchanges) ->
+    lists:filtermap(fun format_one_exchange/1, Exchanges);
+format_exchanges(_) -> [].
+
+%% @private Destructure a single AAE exchange entry.
+%% Same defensive pattern as handoff — stringify unknown shapes.
+format_one_exchange(Ex) when is_tuple(Ex) ->
+    {true, #{raw => iolist_to_binary(io_lib:format("~p", [Ex]))}};
+format_one_exchange(Ex) when is_map(Ex) ->
+    {true, Ex};
+format_one_exchange(_) ->
+    false.

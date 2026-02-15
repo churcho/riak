@@ -1,3 +1,4 @@
+{"1.2.0",
 [{<<"basho_stats">>,
   {git,"https://github.com/OpenRiak/basho_stats.git",
        {ref,"189e194515f50dc00989d1cc8fe7ae440ffc0f03"}},
@@ -18,6 +19,8 @@
   {git,"https://github.com/OpenRiak/cluster_info.git",
        {ref,"605991c54396de8d79db2dce3dd5bcb99a941a4b"}},
   2},
+ {<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.12.0">>},0},
+ {<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.13.0">>},1},
  {<<"cuttlefish">>,
   {git,"https://github.com/OpenRiak/cuttlefish.git",
        {ref,"3d66fbdc6f1fe4fa551a86b25d28e8eb31e34122"}},
@@ -51,6 +54,7 @@
   {git,"https://github.com/OpenRiak/ibrowse.git",
        {ref,"3fd17dd33c474800a4d02ad4e5ae9d4db45e0335"}},
   2},
+ {<<"jsx">>,{pkg,<<"jsx">>,<<"3.1.0">>},0},
  {<<"kv_index_tictactree">>,
   {git,"https://github.com/OpenRiak/kv_index_tictactree.git",
        {ref,"c534c9f915edda6d8d1d35d9f965b18aab18ed15"}},
@@ -79,6 +83,7 @@
   {git,"https://github.com/OpenRiak/poolboy.git",
        {ref,"05648efcb96a58cafdeadeb4072cb6c3ada0ac66"}},
   2},
+ {<<"ranch">>,{pkg,<<"ranch">>,<<"1.8.0">>},1},
  {<<"recon">>,
   {git,"https://github.com/OpenRiak/recon",
        {ref,"36590aa24784d13f4ae967e5715249c82956e95a"}},
@@ -142,4 +147,16 @@
  {<<"webmachine">>,
   {git,"https://github.com/OpenRiak/webmachine.git",
        {ref,"1a0c47adacc84fe1e3b28afb991b60832afae343"}},
-  2}].
+  2}]}.
+[
+{pkg_hash,[
+ {<<"cowboy">>, <<"F276D521A1FF88B2B9B4C54D0E753DA6C66DD7BE6C9FCA3D9418B561828A3731">>},
+ {<<"cowlib">>, <<"DB8F7505D8332D98EF50A3EF34B34C1AFDDEC7506E4EE4DD4A3A266285D282CA">>},
+ {<<"jsx">>, <<"D12516BAA0BB23A59BB35DCCAF02A1BD08243FCBB9EFE24F2D9D056CCFF71268">>},
+ {<<"ranch">>, <<"8C7A100A139FD57F17327B6413E4167AC559FBC04CA7448E9BE9057311597A1D">>}]},
+{pkg_hash_ext,[
+ {<<"cowboy">>, <<"8A7ABE6D183372CEB21CAA2709BEC928AB2B72E18A3911AA1771639BEF82651E">>},
+ {<<"cowlib">>, <<"E1E1284DC3FC030A64B1AD0D8382AE7E99DA46C3246B815318A4B848873800A4">>},
+ {<<"jsx">>, <<"0C5CC8FDC11B53CC25CF65AC6705AD39E54ECC56D1C22E4ADB8F5A53FB9427F3">>},
+ {<<"ranch">>, <<"49FBCFD3682FAB1F5D109351B61257676DA1A2FDBE295904176D5E521A2DDFE5">>}]}
+].

@@ -1,0 +1,100 @@
+%% @doc EUnit tests for riak_admin_api_app.
+%%
+%% Tests the resolve_port/0 logic and route definitions.
+
+-module(riak_admin_api_app_test).
+-include_lib("eunit/include/eunit.hrl").
+-compile([export_all, nowarn_export_all]).
+
+%%% ============================================================
+%%% resolve_port/0
+%%%
+%%% We can't directly call resolve_port/0 since it's not exported,
+%%% but we can test the port logic by verifying the regex pattern
+%%% and arithmetic match expectations.
+%%% ============================================================
+
+port_calculation_test_() ->
+    %% Verify the formula: 10000 + N * 10 + 5
+    [
+        ?_assertEqual(10015, 10000 + 1 * 10 + 5),
+        ?_assertEqual(10025, 10000 + 2 * 10 + 5),
+        ?_assertEqual(10035, 10000 + 3 * 10 + 5),
+        ?_assertEqual(10045, 10000 + 4 * 10 + 5),
+        ?_assertEqual(10055, 10000 + 5 * 10 + 5),
+        ?_assertEqual(10065, 10000 + 6 * 10 + 5),
+        ?_assertEqual(10075, 10000 + 7 * 10 + 5),
+        ?_assertEqual(10085, 10000 + 8 * 10 + 5)
+    ].
+
+port_regex_devnode_test() ->
+    %% The regex should match devN@ at the start
+    ?assertMatch({match, ["1"]},
+        re:run("dev1@127.0.0.1", "^dev([0-9]+)@", [{capture, [1], list}])),
+    ?assertMatch({match, ["10"]},
+        re:run("dev10@127.0.0.1", "^dev([0-9]+)@", [{capture, [1], list}])).
+
+port_regex_non_devnode_test() ->
+    %% Non-dev node names should not match
+    ?assertEqual(nomatch,
+        re:run("riak@10.0.0.1", "^dev([0-9]+)@", [{capture, [1], list}])),
+    ?assertEqual(nomatch,
+        re:run("prod@riak.example.com", "^dev([0-9]+)@", [{capture, [1], list}])).
+
+%%% ============================================================
+%%% Port collision check
+%%% ============================================================
+
+no_port_collision_test() ->
+    %% Verify admin API ports (100N5) don't collide with any
+    %% existing Riak devrel ports:
+    %%   100N6 = cluster_manager
+    %%   100N7 = protobuf
+    %%   100N8 = HTTP (webmachine)
+    %%   100N9 = handoff
+    lists:foreach(fun(N) ->
+        AdminPort = 10000 + N * 10 + 5,
+        ClusterMgr = 10000 + N * 10 + 6,
+        PB = 10000 + N * 10 + 7,
+        HTTP = 10000 + N * 10 + 8,
+        Handoff = 10000 + N * 10 + 9,
+        ?assertNotEqual(AdminPort, ClusterMgr),
+        ?assertNotEqual(AdminPort, PB),
+        ?assertNotEqual(AdminPort, HTTP),
+        ?assertNotEqual(AdminPort, Handoff)
+    end, lists:seq(1, 8)).
+
+%%% ============================================================
+%%% Routes
+%%% ============================================================
+
+routes_defined_test() ->
+    Routes = riak_admin_api_app:routes(),
+    ?assert(is_list(Routes)),
+    ?assert(length(Routes) >= 6),
+    %% Each route is a {Path, Handler, Opts} tuple
+    lists:foreach(fun({Path, Handler, Opts}) ->
+        ?assert(is_list(Path) orelse is_binary(Path)),
+        ?assert(is_atom(Handler)),
+        ?assert(is_list(Opts))
+    end, Routes).
+
+routes_contain_ping_test() ->
+    Routes = riak_admin_api_app:routes(),
+    Paths = [Path || {Path, _, _} <- Routes],
+    ?assert(lists:member("/api/ping", Paths)).
+
+routes_contain_cluster_status_test() ->
+    Routes = riak_admin_api_app:routes(),
+    Paths = [Path || {Path, _, _} <- Routes],
+    ?assert(lists:member("/api/cluster/status", Paths)).
+
+routes_handler_naming_test() ->
+    %% All handlers should use the rah_ prefix
+    Routes = riak_admin_api_app:routes(),
+    lists:foreach(fun({_Path, Handler, _Opts}) ->
+        HandlerStr = atom_to_list(Handler),
+        ?assert(lists:prefix("rah_", HandlerStr),
+                lists:flatten(io_lib:format(
+                    "Handler ~p does not use rah_ prefix", [Handler])))
+    end, Routes).

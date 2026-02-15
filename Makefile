@@ -118,7 +118,52 @@ DEVNODES ?= 8
 SEQ = $(shell awk 'BEGIN { for (i = 1; i < '$(DEVNODES)'; i++) printf("%i ", i); print i ;exit(0);}')
 
 $(eval stagedevrel : $(foreach n,$(SEQ),stagedev$(n)))
-$(eval devrel : $(foreach n,$(SEQ),dev$(n)))
+$(eval devrel : compile $(foreach n,$(SEQ),dev$(n)) codesign-macos)
+
+## macOS Apple Silicon code-signing fix.
+##
+## When relx assembles a release it copies the ERTS binaries (beam.smp,
+## erlexec, escript, etc.) from the Erlang installation into each dev
+## node's erts-*/bin/ directory. On Apple Silicon Macs (M1/M2/M3/M4),
+## copying a Mach-O binary to a new path invalidates its ad-hoc code
+## signature. The macOS kernel enforces signature validation and kills
+## unsigned binaries with SIGKILL (exit code 137).
+##
+## The most visible symptom is the Cuttlefish config generator failing
+## silently during `riak daemon` startup:
+##
+##   $ dev/dev1/riak/bin/riak daemon
+##   Cuttlefish failed! Oh no!:
+##
+## This happens because the `cf_config` hook runs `erts-*/bin/escript`
+## to invoke Cuttlefish, and that binary gets killed before it can
+## generate the node's sys.config and vm.args files.
+##
+## The fix is to re-sign all Mach-O binaries with an ad-hoc signature
+## (`codesign -fs -`) after relx copies them. This target runs
+## automatically after devrel on macOS and is a harmless no-op on
+## Linux/FreeBSD.
+##
+## This does NOT affect:
+##   - Linux (no code-signing enforcement)
+##   - FreeBSD (no code-signing enforcement)
+##   - Docker containers (Linux kernel)
+##   - CI runners (typically Linux)
+##
+## See: https://developer.apple.com/documentation/security/updating-mac-software
+.PHONY: codesign-macos
+codesign-macos:
+ifeq ($(shell uname -s),Darwin)
+	@echo "Signing ERTS binaries for macOS (Apple Silicon code-signing fix)..."
+	@for d in dev/dev*/riak/erts-*/bin/*; do \
+		if file "$$d" | grep -q Mach-O; then \
+			codesign -fs - "$$d" 2>/dev/null || true; \
+		fi; \
+	done
+	@echo "Done signing ERTS binaries."
+else
+	@true
+endif
 
 dev% : all
 	rel/gen_dev dev$* rel/vars/dev_vars.config.src rel/vars/$*_vars.config

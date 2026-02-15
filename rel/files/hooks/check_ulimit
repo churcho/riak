@@ -3,7 +3,8 @@
 ULIMIT_WARN=65536
 ULIMIT_F=`ulimit -n`
 
-if [ "$ULIMIT_F" -lt $ULIMIT_WARN ]; then
+# "unlimited" satisfies any threshold — only warn for numeric values
+if [ "$ULIMIT_F" != "unlimited" ] && [ "$ULIMIT_F" -lt $ULIMIT_WARN ]; then
     echo "!!!!"
     echo "!!!! WARNING: ulimit -n is ${ULIMIT_F}; ${ULIMIT_WARN} is the recommended minimum."
     echo "!!!!"

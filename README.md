@@ -51,3 +51,33 @@ Issues and PRs can be tracked via [Riak Github](https://github.com/OpenRiak/riak
 Discussions on the ongoing development of the OpenRiak version of Riak KV [can be found on Github](https://github.com/orgs/OpenRiak/discussions).
 
 The OpenRiak community is supported by [the Erlang Ecosystem Foundation](https://erlef.org/).
+
+## macOS Apple Silicon Code-Signing
+
+When building Riak on Apple Silicon Macs (M1/M2/M3/M4), `make devrel` copies the Erlang ERTS binaries (`beam.smp`, `erlexec`, `escript`, etc.) from your Erlang installation into each dev node's `erts-*/bin/` directory. Copying a Mach-O binary to a new path invalidates its ad-hoc code signature, and the macOS kernel enforces signature validation by killing unsigned binaries with `SIGKILL` (exit code 137).
+
+**Symptom:** `riak daemon` fails immediately with:
+
+```
+Cuttlefish failed! Oh no!:
+```
+
+This happens because the `cf_config` startup hook runs `erts-*/bin/escript` to invoke Cuttlefish for config generation, and that binary is killed before it can produce the node's `sys.config` and `vm.args` files. The Erlang VM itself never starts.
+
+**Fix:** The `make devrel` target automatically runs `codesign -fs -` (ad-hoc signing) on all Mach-O binaries after building. If you need to re-sign manually:
+
+```bash
+for d in dev/dev*/riak/erts-*/bin/*; do
+    file "$d" | grep -q Mach-O && codesign -fs - "$d" 2>/dev/null
+done
+```
+
+**Platforms affected:**
+
+| Platform | Affected? | Notes |
+|----------|-----------|-------|
+| macOS Apple Silicon | Yes | Kernel enforces code signatures |
+| macOS Intel | Rarely | Less strict enforcement |
+| Linux | No | No code-signing enforcement |
+| FreeBSD | No | No code-signing enforcement |
+| Docker (any host) | No | Linux kernel inside container |
