@@ -135,6 +135,19 @@ assert_handler_rejects_non_get(Module) ->
     ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)),
     ?assertEqual(expected_method_not_allowed_reason(Method), maps:get(<<"reason">>, Decoded)).
 
+json_reply_fallback_on_encode_error_test() ->
+    Req0 = #{pid => self(), streamid => 99},
+    _Req = riak_admin_api_handler:json_reply(200,
+        #{bad => fun() -> ok end}, Req0),
+
+    {Status, Headers, Body} = receive_response_for_stream(99),
+    ?assertEqual(500, Status),
+    ?assertEqual(<<"application/json; charset=utf-8">>, maps:get(<<"content-type">>, Headers)),
+
+    Decoded = jsx:decode(Body, [return_maps]),
+    ?assertEqual(<<"json_encoding_error">>, maps:get(<<"error">>, Decoded)),
+    ?assertEqual(<<"{error,badarg}">>, maps:get(<<"reason">>, Decoded)).
+
 expected_method_not_allowed_reason(Method) ->
     iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])).
 
