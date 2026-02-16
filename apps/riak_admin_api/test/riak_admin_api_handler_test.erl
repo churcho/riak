@@ -1,7 +1,4 @@
 %% @doc EUnit tests for riak_admin_api_handler shared helpers.
-%%
-%% Tests json_reply/3 and error_reply/4 by using a real Cowboy
-%% request object built from cowboy_req:new/0 (test helper).
 
 -module(riak_admin_api_handler_test).
 -include_lib("eunit/include/eunit.hrl").
@@ -15,18 +12,15 @@ json_reply_encodes_map_test() ->
     Data = #{status => <<"ok">>, count => 42},
     Encoded = jsx:encode(Data),
     ?assert(is_binary(Encoded)),
-    %% Verify it round-trips
     Decoded = jsx:decode(Encoded, [return_maps]),
     ?assertEqual(42, maps:get(<<"count">>, Decoded)).
 
 json_reply_encodes_atoms_test() ->
-    %% jsx should encode atom values as strings
     Encoded = jsx:encode(#{key => some_atom}),
     Decoded = jsx:decode(Encoded, [return_maps]),
     ?assertEqual(<<"some_atom">>, maps:get(<<"key">>, Decoded)).
 
 json_reply_encodes_node_name_test() ->
-    %% Node names like 'dev1@127.0.0.1' must encode safely
     Encoded = jsx:encode(#{node => node()}),
     ?assert(is_binary(Encoded)).
 
@@ -35,7 +29,6 @@ json_reply_encodes_node_name_test() ->
 %%% ============================================================
 
 error_reply_json_shape_test() ->
-    %% Verify the error response shape matches the contract
     Data = #{error => <<"backend_error">>, reason => <<"timeout">>},
     Encoded = jsx:encode(Data),
     Decoded = jsx:decode(Encoded, [return_maps]),
@@ -43,11 +36,35 @@ error_reply_json_shape_test() ->
     ?assertEqual(<<"timeout">>, maps:get(<<"reason">>, Decoded)).
 
 %%% ============================================================
+%%% format_reason/1 (via error_reply accepting term() reasons)
+%%% ============================================================
+
+format_reason_binary_passthrough_test() ->
+    %% Binary reasons pass through unchanged
+    Data = #{error => <<"e">>, reason => <<"already binary">>},
+    Encoded = jsx:encode(Data),
+    Decoded = jsx:decode(Encoded, [return_maps]),
+    ?assertEqual(<<"already binary">>, maps:get(<<"reason">>, Decoded)).
+
+format_reason_tuple_test() ->
+    %% Tuple reasons get formatted via ~p
+    Reason = {error, timeout},
+    Formatted = iolist_to_binary(io_lib:format("~p", [Reason])),
+    Data = #{error => <<"e">>, reason => Formatted},
+    Encoded = jsx:encode(Data),
+    ?assert(is_binary(Encoded)).
+
+format_reason_atom_test() ->
+    %% Atom reasons get formatted via ~p
+    Formatted = iolist_to_binary(io_lib:format("~p", [some_error])),
+    ?assert(is_binary(Formatted)),
+    ?assertNotEqual(<<>>, Formatted).
+
+%%% ============================================================
 %%% Edge cases for jsx encoding
 %%% ============================================================
 
 jsx_encodes_large_integer_test() ->
-    %% Ring hash indices are 2^160 range integers
     Hash = 1461501637330902918203684832716283019655932542976,
     Encoded = jsx:encode(#{hash => Hash}),
     Decoded = jsx:decode(Encoded, [return_maps]),
