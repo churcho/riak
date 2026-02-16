@@ -15,3 +15,4 @@ riak.png
 log/*
 rebar3.crashdump
 .eunit
+.claude/

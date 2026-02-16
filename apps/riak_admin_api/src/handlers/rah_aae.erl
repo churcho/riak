@@ -5,13 +5,18 @@
 
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
-    case riak_admin_api_riak:aae_status() of
-        {ok, Exchanges} ->
-            Req = riak_admin_api_handler:json_reply(200,
-                #{exchanges => Exchanges, count => length(Exchanges)}, Req0),
-            {ok, Req, State};
-        {error, Reason} ->
-            Req = riak_admin_api_handler:error_reply(500,
-                <<"backend_error">>, Reason, Req0),
+    case riak_admin_api_handler:ensure_get(Req0) of
+        {ok, Req1} ->
+            case riak_admin_api_riak:aae_status() of
+                {ok, Exchanges} ->
+                    Req = riak_admin_api_handler:json_reply(200,
+                        #{exchanges => Exchanges, count => length(Exchanges)}, Req1),
+                    {ok, Req, State};
+                {error, Reason} ->
+                    Req = riak_admin_api_handler:error_reply(500,
+                        <<"backend_error">>, Reason, Req1),
+                    {ok, Req, State}
+            end;
+        {error, Req} ->
             {ok, Req, State}
     end.

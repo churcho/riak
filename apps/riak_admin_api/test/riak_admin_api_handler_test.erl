@@ -86,3 +86,35 @@ jsx_encodes_list_of_maps_test() ->
     Encoded = jsx:encode(Data),
     Decoded = jsx:decode(Encoded, [return_maps]),
     ?assertEqual(2, length(maps:get(<<"nodes">>, Decoded))).
+
+%%% ============================================================
+%%% ensure_get/1 method filtering
+%%% ============================================================
+
+ensure_get_accepts_get_test() ->
+    Req = #{method => <<"GET">>},
+    ?assertEqual({ok, Req}, riak_admin_api_handler:ensure_get(Req)).
+
+ensure_get_rejects_non_get_test() ->
+    Req0 = #{method => <<"POST">>, pid => self(), streamid => 42},
+    {error, Req1} = riak_admin_api_handler:ensure_get(Req0),
+
+    {Status, Headers, Body} = receive_response_for_stream(42),
+    ?assertEqual(405, Status),
+    ?assertEqual(<<"GET">>, maps:get(<<"allow">>, Headers)),
+    ?assertEqual(<<"application/json; charset=utf-8">>, maps:get(<<"content-type">>, Headers)),
+    ?assertEqual(true, maps:get(has_sent_resp, Req1)),
+
+    Decoded = jsx:decode(Body, [return_maps]),
+    ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)),
+    ?assertMatch({_, _}, binary:match(maps:get(<<"reason">>, Decoded), <<"Unsupported HTTP method:">>)),
+    ?assertMatch({_, _}, binary:match(maps:get(<<"reason">>, Decoded), <<"\"POST\"">>)).
+
+receive_response_for_stream(StreamID) ->
+    Pid = self(),
+    receive
+        {{Pid, StreamID}, {response, Status, Headers, Body}} ->
+            {Status, Headers, Body}
+    after 500 ->
+        ?assert(false)
+    end.

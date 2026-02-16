@@ -8,27 +8,32 @@
 
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
-    NodeBin = cowboy_req:binding(node, Req0),
-    try binary_to_existing_atom(NodeBin, utf8) of
-        Node ->
-            case riak_admin_api_riak:node_stats(Node) of
-                {ok, Data} ->
-                    Req = riak_admin_api_handler:json_reply(200, Data, Req0),
-                    {ok, Req, State};
-                {error, {unreachable, _} = Reason} ->
-                    Req = riak_admin_api_handler:error_reply(503,
-                        <<"node_unreachable">>, Reason, Req0),
-                    {ok, Req, State};
-                {error, Reason} ->
-                    Req = riak_admin_api_handler:error_reply(500,
-                        <<"backend_error">>, Reason, Req0),
+    case riak_admin_api_handler:ensure_get(Req0) of
+        {ok, Req1} ->
+            NodeBin = cowboy_req:binding(node, Req1),
+            try binary_to_existing_atom(NodeBin, utf8) of
+                Node ->
+                    case riak_admin_api_riak:node_stats(Node) of
+                        {ok, Data} ->
+                            Req = riak_admin_api_handler:json_reply(200, Data, Req1),
+                            {ok, Req, State};
+                        {error, {unreachable, _} = Reason} ->
+                            Req = riak_admin_api_handler:error_reply(503,
+                                <<"node_unreachable">>, Reason, Req1),
+                            {ok, Req, State};
+                        {error, Reason} ->
+                            Req = riak_admin_api_handler:error_reply(500,
+                                <<"backend_error">>, Reason, Req1),
+                            {ok, Req, State}
+                    end
+            catch
+                error:badarg ->
+                    Req = riak_admin_api_handler:error_reply(404,
+                        <<"unknown_node">>,
+                        <<"Node name not recognised: ", NodeBin/binary>>, Req1),
                     {ok, Req, State}
             end
-    catch
-        error:badarg ->
-            Req = riak_admin_api_handler:error_reply(404,
-                <<"unknown_node">>,
-                <<"Node name not recognised: ", NodeBin/binary>>,
-                Req0),
+        ;
+        {error, Req} ->
             {ok, Req, State}
     end.
