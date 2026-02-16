@@ -19,10 +19,16 @@ Riak's existing Webmachine/Mochiweb stack is aging and the long-term goal is to 
 
 ```
 riak_admin_api (OTP application)
-├── riak_admin_api_app    — Application callback; starts Cowboy listener
-├── riak_admin_api_sup    — Top-level supervisor (empty for now)
-└── handlers/
-    └── rah_ping          — GET /api/ping health-check handler
+ ├── riak_admin_api_app    — Application callback; starts Cowboy listener
+ ├── riak_admin_api_sup    — Top-level supervisor (empty for now)
+ └── handlers/
+     ├── rah_ping          — GET /api/ping health-check handler
+     ├── rah_cluster       — GET /api/cluster/status
+     ├── rah_dcs           — GET /api/dcs
+     ├── rah_ring          — GET /api/ring/ownership
+     ├── rah_nodes         — GET /api/nodes/:node/stats
+     ├── rah_handoff       — GET /api/handoff/status
+     └── rah_aae           — GET /api/aae/status
 ```
 
 ### Handler naming
@@ -40,6 +46,9 @@ These are declared in both `apps/riak_admin_api/rebar.config` and the top-level 
 
 ## Endpoints
 
+All documented endpoints are currently GET-only. Non-GET requests receive a `405` with:
+`{"error":"method_not_allowed","reason":"Unsupported HTTP method: ..."}` and an `Allow: GET` header.
+
 ### GET /api/ping
 
 Health check. Returns the node name and status.
@@ -50,6 +59,42 @@ $ curl -s http://127.0.0.1:8099/api/ping | python3 -m json.tool
     "node": "dev1@127.0.0.1",
     "status": "ok"
 }
+```
+
+### GET /api/cluster/status
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/cluster/status | python3 -m json.tool | head
+```
+
+### GET /api/dcs
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/dcs | python3 -m json.tool | head
+```
+
+### GET /api/ring/ownership
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/ring/ownership | python3 -m json.tool | head
+```
+
+### GET /api/nodes/:node/stats
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/nodes/dev1%40127.0.0.1/stats | python3 -m json.tool | head
+```
+
+### GET /api/handoff/status
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/handoff/status | python3 -m json.tool | head
+```
+
+### GET /api/aae/status
+
+```bash
+$ curl -s http://127.0.0.1:8099/api/aae/status | python3 -m json.tool | head
 ```
 
 ## Configuration
@@ -73,15 +118,25 @@ To override in a release, add to `etc/advanced.config`:
 ].
 ```
 
+In devrel, the listener is auto-resolved per node when the name matches
+`devN@127.0.0.1`:
+
+- `dev1@127.0.0.1` -> `10015`
+- `dev2@127.0.0.1` -> `10025`
+
+Non-dev nodes (including single-node production) use the configured
+`http_port` value (default `8099`).
+
 ## Port map (devrel)
 
-In a devrel cluster, each node uses the Riak HTTP port assigned by `gen_dev`. The admin API currently uses a single fixed port (8099), so only one node serves the admin API in local development. Future milestones will assign per-node admin ports.
+In a devrel cluster, each node uses the Riak HTTP port assigned by `gen_dev`.
+The admin API uses `100N5` for `devN` nodes (for example, `dev1@127.0.0.1` -> `10015`).
 
 | Service | Port | Notes |
 |---------|------|-------|
 | Riak HTTP (dev1) | 10018 | Data-path API (Webmachine) |
 | Riak PB (dev1) | 10017 | Protocol Buffers |
-| Admin API | 8099 | This application (Cowboy) |
+| Admin API | 10015 (dev1), 10025 (dev2), ... | This application (Cowboy) |
 
 ## macOS Apple Silicon note
 

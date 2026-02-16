@@ -14,5 +14,6 @@ rel/vars/*_vars.config
 riak.png
 log/*
 rebar3.crashdump
+erl_crash.dump
 .eunit
 .claude/
