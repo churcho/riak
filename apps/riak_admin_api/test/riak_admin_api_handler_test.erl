@@ -96,6 +96,7 @@ ensure_get_accepts_get_test() ->
     ?assertEqual({ok, Req}, riak_admin_api_handler:ensure_get(Req)).
 
 ensure_get_rejects_non_get_test() ->
+    Method = <<"POST">>,
     Req0 = #{method => <<"POST">>, pid => self(), streamid => 42},
     {error, Req1} = riak_admin_api_handler:ensure_get(Req0),
 
@@ -107,8 +108,35 @@ ensure_get_rejects_non_get_test() ->
 
     Decoded = jsx:decode(Body, [return_maps]),
     ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)),
-    ?assertMatch({_, _}, binary:match(maps:get(<<"reason">>, Decoded), <<"Unsupported HTTP method:">>)),
-    ?assertMatch({_, _}, binary:match(maps:get(<<"reason">>, Decoded), <<"\"POST\"">>)).
+    ?assertEqual(expected_method_not_allowed_reason(Method), maps:get(<<"reason">>, Decoded)).
+
+handler_init_rejects_non_get_test() ->
+    assert_handler_rejects_non_get(rah_aae),
+    assert_handler_rejects_non_get(rah_cluster),
+    assert_handler_rejects_non_get(rah_dcs),
+    assert_handler_rejects_non_get(rah_handoff),
+    assert_handler_rejects_non_get(rah_nodes),
+    assert_handler_rejects_non_get(rah_ping),
+    assert_handler_rejects_non_get(rah_ring).
+
+assert_handler_rejects_non_get(Module) ->
+    Method = <<"DELETE">>,
+    StreamID = {Module, make_ref()},
+    Req0 = #{method => Method, pid => self(), streamid => StreamID},
+    {ok, Req, _State} = Module:init(Req0, #{}),
+
+    {Status, Headers, Body} = receive_response_for_stream(StreamID),
+    ?assertEqual(405, Status),
+    ?assertEqual(<<"application/json; charset=utf-8">>, maps:get(<<"content-type">>, Headers)),
+    ?assertEqual(<<"GET">>, maps:get(<<"allow">>, Headers)),
+    ?assertEqual(true, maps:get(has_sent_resp, Req)),
+
+    Decoded = jsx:decode(Body, [return_maps]),
+    ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)),
+    ?assertEqual(expected_method_not_allowed_reason(Method), maps:get(<<"reason">>, Decoded)).
+
+expected_method_not_allowed_reason(Method) ->
+    iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])).
 
 receive_response_for_stream(StreamID) ->
     Pid = self(),
