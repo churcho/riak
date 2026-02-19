@@ -65,6 +65,12 @@ dispatch(Context, Req, Opts, ReplyOpts) ->
             handle_bucket_listing(Context, Req, Opts, ReplyOpts);
         keys ->
             handle_keys(Context, Req, Opts, ReplyOpts);
+        counter ->
+            handle_counter(Context, Req, Opts, ReplyOpts);
+        crdt_item ->
+            handle_crdt_item(Context, Req, Opts, ReplyOpts);
+        crdt_collection ->
+            handle_crdt_collection(Context, Req, Opts, ReplyOpts);
         query ->
             handle_query(Context, Req, Opts, ReplyOpts);
         index_query ->
@@ -223,6 +229,120 @@ handle_keys(Context, Req, Opts, ReplyOpts) ->
                         reason => iolist_to_binary(
                             io_lib:format("Unsupported HTTP method: ~p", [Method])),
                         allow => [<<"GET">>, <<"HEAD">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_counter(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(
+                counter_get,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"POST">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_bucket_backend(
+                        counter_update,
+                        Context,
+                        (base_backend_input(Context))#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"POST">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_crdt_item(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(
+                crdt_fetch,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(
+                crdt_fetch,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"POST">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_bucket_backend(
+                        crdt_update,
+                        Context,
+                        (base_backend_input(Context))#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>, <<"POST">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_crdt_collection(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"POST">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_bucket_backend(
+                        crdt_create,
+                        Context,
+                        (base_backend_input(Context))#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"POST">>]
                     },
                     ReplyOpts),
                 Req)

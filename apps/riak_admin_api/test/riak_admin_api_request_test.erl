@@ -168,6 +168,31 @@ normalize_mapred_path_and_stream_mode_test() ->
     ?assertEqual(mapred, maps:get(stream_mode, maps:get(query, Req))),
     ?assertEqual(<<"true">>, maps:get(<<"chunked">>, maps:get(query, Req))).
 
+normalize_counter_path_test() ->
+    {ok, Req} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/buckets/users/counters/visits">>, #{}),
+    ?assertEqual(counter, maps:get(op, Req)),
+    ?assertEqual(buckets, maps:get(alias, Req)),
+    ?assertEqual(<<"default">>, maps:get(bucket_type, Req)),
+    ?assertEqual(<<"users">>, maps:get(bucket, Req)),
+    ?assertEqual(<<"visits">>, maps:get(key, Req)).
+
+normalize_crdt_paths_test() ->
+    {ok, CollectionReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/types/maps/buckets/users/datatypes">>, #{}),
+    ?assertEqual(crdt_collection, maps:get(op, CollectionReq)),
+    ?assertEqual(types, maps:get(alias, CollectionReq)),
+    ?assertEqual(<<"maps">>, maps:get(bucket_type, CollectionReq)),
+    ?assertEqual(<<"users">>, maps:get(bucket, CollectionReq)),
+
+    {ok, ItemReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/maps/buckets/users/datatypes/alice">>, #{}),
+    ?assertEqual(crdt_item, maps:get(op, ItemReq)),
+    ?assertEqual(types, maps:get(alias, ItemReq)),
+    ?assertEqual(<<"maps">>, maps:get(bucket_type, ItemReq)),
+    ?assertEqual(<<"users">>, maps:get(bucket, ItemReq)),
+    ?assertEqual(<<"alice">>, maps:get(key, ItemReq)).
+
 normalize_unsupported_path_shapes_test_() ->
     [
         ?_assertMatch(
@@ -305,6 +330,41 @@ normalize_mapred_query_invalid_chunked_test() ->
     {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
     ?assertEqual(400, maps:get(status, Err)),
     ?assertEqual(<<"invalid_query">>, maps:get(code, Err)).
+
+normalize_counter_query_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/counters/visits">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
+
+normalize_crdt_query_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/types/maps/buckets/users/datatypes/alice">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
+
+normalize_counter_method_not_allowed_includes_allow_contract_test() ->
+    Req0 = #{
+        method => <<"HEAD">>,
+        path => <<"/buckets/users/counters/visits">>,
+        headers => #{<<"x-request-id">> => <<"rid-counter-405">>}
+    },
+    {error, Error, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(405, maps:get(status, Error)),
+    ?assertEqual(<<"method_not_allowed">>, maps:get(code, Error)),
+    ?assertEqual(
+        [<<"GET">>, <<"POST">>],
+        maps:get(allow, Error)).
 
 request_id_propagates_from_header_test() ->
     {ok, Headers} = riak_admin_api_request:normalize_headers(

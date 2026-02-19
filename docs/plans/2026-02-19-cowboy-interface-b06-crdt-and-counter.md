@@ -47,18 +47,26 @@ Migrate CRDT and counter APIs to Cowboy, including datatype-specific payload par
 
 ```yaml
 batch: B06
-status: planned
+status: done
 branch: feature/cowboy-b06-crdt-counter
-base_commit: TBD
-end_commit: TBD
+base_commit: fc1758db
+end_commit: see_report_back_output
 artifacts:
   - docs/plans/artifacts/cowboy-crdt-counter-parity-notes.md
 decisions:
-  - TBD
+  - Added explicit Cowboy route coverage for `/buckets/:bucket/counters/:key` and typed CRDT datatype paths to keep route declaration, parser normalization, and dispatch/gateway mapping in lockstep.
+  - Normalized counter and CRDT request parsing with operation-specific query allowlists and method contracts (`counter` GET/POST, `crdt_item` GET/HEAD/POST, `crdt_collection` POST).
+  - Implemented counter parity semantics in gateway with signed integer POST deltas and `returnvalue` handling (`204` vs `200` body).
+  - Implemented CRDT datatype operation decoding via `riak_kv_crdt_json:update_request_from_json/3`, with compatibility-focused error handling for datatype/quorum/notfound/deleted states.
+  - Preserved CRDT `include_context` default behavior and write-time `returnbody` semantics, including CRDT create location headers on typed datatype paths.
 open_risks:
-  - datatype edge-case parity
+  - CRDT default-bucket-type redirect parity is limited to keyed datatype paths; collection create on default bucket type follows datatype validation flow.
+  - Some legacy Webmachine CRDT error responses were plain-text halt bodies; Cowboy keeps compatibility messages but returns them in JSON error envelopes for consistency.
+  - Full cluster-level behavior for all datatype edge combinations still depends on runtime Riak bucket prop configuration and should be revalidated in B07 contract/perf hardening.
 handoff_notes:
-  - B07 should include these endpoints in perf suite
+  - B07 should include counter and CRDT endpoints in contract/performance suites, including default-bucket redirect parity and quorum/deleted-state cases.
+  - Preserve B06 route->parser->internal mapping discipline when extending datatype behavior; any new public path must update artifact route evidence.
+  - Revisit whether CRDT default-bucket collection create should hard-redirect or hard-fail for stricter Webmachine parity before cutover.
 ```
 
 ## Route Matching and Parser Discipline (required)

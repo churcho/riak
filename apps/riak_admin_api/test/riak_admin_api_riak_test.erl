@@ -210,3 +210,27 @@ build_location_respects_alias_families_test() ->
         riak_admin_api_riak:build_location(
             #{alias => types, bucket_type => <<"maps">>, bucket => <<"users">>},
             Key)).
+
+counter_delta_from_body_accepts_signed_integer_test() ->
+    ?assertEqual({ok, 5}, riak_admin_api_riak:counter_delta_from_body(<<"5">>)),
+    ?assertEqual({ok, -7}, riak_admin_api_riak:counter_delta_from_body(<<"-7">>)),
+    ?assertEqual({ok, 12}, riak_admin_api_riak:counter_delta_from_body(<<" 12 ">>)).
+
+counter_delta_from_body_rejects_non_integer_test() ->
+    {error, Error} = riak_admin_api_riak:counter_delta_from_body(<<"not-an-int">>),
+    ?assertEqual(400, maps:get(status, Error)),
+    ?assertEqual(<<"invalid_body">>, maps:get(code, Error)).
+
+crdt_decode_update_body_counter_and_set_test() ->
+    ?assertEqual(
+        {ok, {increment, 3}, undefined},
+        riak_admin_api_riak:crdt_decode_update_body(counter, <<"3">>)),
+    ?assertEqual(
+        {ok, {update, [{add, <<"one">>}]}, undefined},
+        riak_admin_api_riak:crdt_decode_update_body(set, <<"{\"add\":\"one\"}">>)).
+
+crdt_decode_update_body_rejects_invalid_payload_test() ->
+    {error, Error} = riak_admin_api_riak:crdt_decode_update_body(
+        set, <<"{\"increment\":1}">>),
+    ?assertEqual(400, maps:get(status, Error)),
+    ?assertEqual(<<"invalid_body">>, maps:get(code, Error)).

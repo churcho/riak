@@ -70,12 +70,16 @@
     dedup_by_dc/1,
     object_error_map/1,
     build_object_options/3,
-    build_location/2
+    build_location/2,
+    counter_delta_from_body/1,
+    crdt_decode_update_body/2,
+    crdt_response_body/4
 ]).
 -endif.
 
 -include_lib("riak_kv/src/riak_kv_wm_raw.hrl").
 -include_lib("riak_kv/include/riak_kv_index.hrl").
+-include_lib("riak_kv/include/riak_kv_types.hrl").
 
 -define(USERMETA_PREFIX, <<"x-riak-meta-">>).
 -define(INDEX_PREFIX, <<"x-riak-index-">>).
@@ -108,6 +112,7 @@
 -define(QUERY_RESULT_TERMRAWCOUNT, <<"term_with_rawcount">>).
 -define(MAPRED_KEY_INPUTS, <<"inputs">>).
 -define(MAPRED_KEY_QUERY, <<"query">>).
+-define(COUNTER_BUCKET_TYPE, <<"counters">>).
 
 %% Types
 -export_type([dc_info/0]).
@@ -165,6 +170,11 @@ object_operation(_, _Context, _Input, _Client) ->
     set_bucket_type_props |
     list_buckets |
     list_keys |
+    counter_get |
+    counter_update |
+    crdt_fetch |
+    crdt_update |
+    crdt_create |
     index_query |
     query |
     mapred,
@@ -229,6 +239,16 @@ bucket_operation(list_buckets, Context, _Input, Client) ->
     bucket_list_operation(Context, Client);
 bucket_operation(list_keys, Context, _Input, Client) ->
     key_list_operation(Context, Client);
+bucket_operation(counter_get, Context, _Input, Client) ->
+    counter_get_operation(Context, Client);
+bucket_operation(counter_update, Context, Input, Client) ->
+    counter_update_operation(Context, Input, Client);
+bucket_operation(crdt_fetch, Context, _Input, Client) ->
+    crdt_fetch_operation(Context, Client);
+bucket_operation(crdt_update, Context, Input, Client) ->
+    crdt_update_operation(update, Context, Input, Client);
+bucket_operation(crdt_create, Context, Input, Client) ->
+    crdt_update_operation(create, Context, Input, Client);
 bucket_operation(index_query, Context, _Input, Client) ->
     index_operation(Context, Client);
 bucket_operation(query, Context, Input, Client) ->
@@ -1036,6 +1056,342 @@ encode_key_stream_timeout() ->
 
 encode_key_stream_error(Reason) ->
     mochijson2:encode({struct, [{error, Reason}]}).
+
+counter_get_operation(Context, Client) ->
+    Query = maps:get(query, Context, #{}),
+    Key = maps:get(key, Context, undefined),
+    Options = build_object_options(
+        read,
+        Query,
+        [deletedvclock, {return_body, true}, {crdt_op, riak_dt_pncounter}]),
+    case riak_client:get(counter_bucket_ref(Context), Key, Options, Client) of
+        {ok, Obj} ->
+            {ok, #{
+                status => 200,
+                body => integer_to_binary(riak_kv_crdt:counter_value(Obj)),
+                content_type => <<"text/plain; charset=utf-8">>
+            }};
+        {error, Reason} ->
+            {error, object_error_map(Reason)}
+    end.
+
+counter_update_operation(Context, Input, Client) ->
+    case counter_delta_from_body(maps:get(body, Input, <<>>)) of
+        {ok, Amount} ->
+            Query = maps:get(query, Context, #{}),
+            Key = maps:get(key, Context, undefined),
+            Obj = riak_kv_crdt:new(counter_bucket_ref(Context), Key, riak_dt_pncounter),
+            CrdtOp = #crdt_op{
+                mod = riak_dt_pncounter,
+                op = counter_to_crdt_op(Amount),
+                ctx = undefined
+            },
+            BaseOptions = build_object_options(write, Query, []),
+            ReturnValue = query_truthy(<<"returnvalue">>, Query),
+            Options0 = [{crdt_op, CrdtOp}, {retry_put_coordinator_failure, false} | BaseOptions],
+            Options = case ReturnValue of
+                true -> [returnbody | Options0];
+                false -> Options0
+            end,
+            case riak_client:put(Obj, Options, Client) of
+                ok ->
+                    {ok, #{status => 204, body => <<>>}};
+                {ok, UpdatedObj} ->
+                    {ok, #{
+                        status => 200,
+                        body => integer_to_binary(riak_kv_crdt:counter_value(UpdatedObj)),
+                        content_type => <<"text/plain; charset=utf-8">>
+                    }};
+                {error, Reason} ->
+                    {error, object_error_map(Reason)}
+            end;
+        {error, Error} ->
+            {error, Error}
+    end.
+
+crdt_fetch_operation(Context, Client) ->
+    case maybe_crdt_counter_redirect(Context) of
+        {redirect, Location} ->
+            {ok, crdt_redirect_reply(Location)};
+        no_redirect ->
+            case crdt_bucket_module(Context) of
+                {ok, Type, Mod} ->
+                    Query = maps:get(query, Context, #{}),
+                    Key = maps:get(key, Context, undefined),
+                    IncludeContext = crdt_query_flag(Query, <<"include_context">>, true),
+                    Options = build_object_options(
+                        read,
+                        Query,
+                        [deletedvclock, {return_body, true}, {crdt_op, Mod}]),
+                    case riak_client:get(bucket_ref(Context), Key, Options, Client) of
+                        {ok, Obj} ->
+                            {ok, #{
+                                status => 200,
+                                body => crdt_response_body(Type, Mod, Obj, IncludeContext),
+                                content_type => <<"application/json; charset=utf-8">>
+                            }};
+                        {error, notfound} ->
+                            {ok, crdt_notfound_reply(Type, false, undefined)};
+                        {error, {deleted, VClock}} ->
+                            {ok, crdt_notfound_reply(Type, true, VClock)};
+                        {error, Reason} ->
+                            {error, object_error_map(Reason)}
+                    end;
+                {error, Error} ->
+                    {error, Error}
+            end
+    end.
+
+crdt_update_operation(Mode, Context0, Input, Client) ->
+    case maybe_crdt_counter_redirect(Context0) of
+        {redirect, Location} ->
+            {ok, crdt_redirect_reply(Location)};
+        no_redirect ->
+            Context = case Mode of
+                create ->
+                    Context0#{key => list_to_binary(riak_core_util:unique_id_62())};
+                _ ->
+                    Context0
+            end,
+            case crdt_bucket_module(Context) of
+                {ok, Type, Mod} ->
+                    Query = maps:get(query, Context, #{}),
+                    ReturnBody = crdt_query_flag(Query, <<"returnbody">>, false),
+                    IncludeContext = crdt_query_flag(Query, <<"include_context">>, true),
+                    case crdt_decode_update_body(Type, maps:get(body, Input, <<>>)) of
+                        {ok, Op, OpCtx} ->
+                            Obj = riak_kv_crdt:new(
+                                bucket_ref(Context),
+                                maps:get(key, Context, undefined),
+                                Mod),
+                            CrdtOp = #crdt_op{mod = Mod, op = Op, ctx = OpCtx},
+                            BaseOptions = build_object_options(write, Query, []),
+                            Options0 = [
+                                {crdt_op, CrdtOp},
+                                {retry_put_coordinator_failure, false}
+                                | BaseOptions
+                            ],
+                            Options = case ReturnBody of
+                                true -> [returnbody | Options0];
+                                false -> Options0
+                            end,
+                            case riak_client:put(Obj, Options, Client) of
+                                ok ->
+                                    {ok, crdt_write_no_body_reply(Mode, Context)};
+                                {ok, UpdatedObj} ->
+                                    {ok, crdt_write_body_reply(
+                                        Mode, Context, Type, Mod, UpdatedObj, IncludeContext)};
+                                {error, Reason} ->
+                                    {error, object_error_map(Reason)}
+                            end;
+                        {error, Error} ->
+                            {error, Error}
+                    end;
+                {error, Error} ->
+                    {error, Error}
+            end
+    end.
+
+crdt_write_no_body_reply(create, Context) ->
+    #{
+        status => 201,
+        body => <<>>,
+        headers => #{<<"location">> => build_crdt_location(Context, maps:get(key, Context))}
+    };
+crdt_write_no_body_reply(_Mode, _Context) ->
+    #{status => 204, body => <<>>}.
+
+crdt_write_body_reply(Mode, Context, Type, Mod, Obj, IncludeContext) ->
+    Reply0 = #{
+        status => 200,
+        body => crdt_response_body(Type, Mod, Obj, IncludeContext),
+        content_type => <<"application/json; charset=utf-8">>
+    },
+    case Mode of
+        create ->
+            Reply0#{
+                headers => #{
+                    <<"location">> => build_crdt_location(Context, maps:get(key, Context))
+                }
+            };
+        _ ->
+            Reply0
+    end.
+
+maybe_crdt_counter_redirect(Context) ->
+    case {maps:get(bucket_type, Context, <<"default">>), maps:get(key, Context, undefined)} of
+        {<<"default">>, Key} when is_binary(Key), Key =/= <<>> ->
+            Bucket = maps:get(bucket, Context, <<>>),
+            {redirect, <<"/buckets/", Bucket/binary, "/counters/", Key/binary>>};
+        _ ->
+            no_redirect
+    end.
+
+crdt_redirect_reply(Location) ->
+    #{
+        status => 301,
+        body => <<"Counters in the default bucket-type should use the legacy URL\n">>,
+        content_type => <<"text/plain; charset=utf-8">>,
+        headers => #{<<"location">> => Location}
+    }.
+
+counter_bucket_ref(Context) ->
+    {?COUNTER_BUCKET_TYPE, maps:get(bucket, Context, undefined)}.
+
+counter_to_crdt_op(Amount) when Amount >= 0 ->
+    {increment, Amount};
+counter_to_crdt_op(Amount) ->
+    {decrement, -Amount}.
+
+counter_delta_from_body(Body0) ->
+    Body = string:trim(binary_to_list(to_bin(Body0))),
+    case Body of
+        [] ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_body">>,
+                reason => <<"Counter update body must be an integer">>
+            }};
+        _ ->
+            try
+                {ok, list_to_integer(Body)}
+            catch
+                error:badarg ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_body">>,
+                        reason => <<"Counter update body must be an integer">>
+                    }}
+            end
+    end.
+
+crdt_bucket_module(Context) ->
+    BucketType = maps:get(bucket_type, Context, <<"default">>),
+    Bucket = maps:get(bucket, Context, undefined),
+    case riak_core_bucket:get_bucket({BucketType, Bucket}) of
+        BucketProps when is_list(BucketProps) ->
+            AllowMult = proplists:get_value(allow_mult, BucketProps),
+            Datatype = proplists:get_value(datatype, BucketProps),
+            Mod = riak_kv_crdt:to_mod(Datatype),
+            case {AllowMult, riak_kv_crdt:supported(Mod)} of
+                {false, _} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_datatype">>,
+                        reason => <<"Bucket must be allow_mult=true">>
+                    }};
+                {_, false} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_datatype">>,
+                        reason => iolist_to_binary([
+                            <<"Bucket datatype '">>,
+                            to_bin(Datatype),
+                            <<"' is not a supported type.">>
+                        ])
+                    }};
+                _ ->
+                    {ok, riak_kv_crdt:from_mod(Mod), Mod}
+            end;
+        {error, no_type} ->
+            {error, object_error_map(bucket_type_unknown)};
+        undefined ->
+            {error, object_error_map(bucket_type_unknown)};
+        Other ->
+            {error, object_error_map(Other)}
+    end.
+
+crdt_decode_update_body(Type, Body) ->
+    try
+        Json = mochijson2:decode(Body),
+        ModMap = riak_kv_crdt:mod_map(Type),
+        {Type, Op, OpCtx} = riak_kv_crdt_json:update_request_from_json(Type, Json, ModMap),
+        {ok, Op, OpCtx}
+    catch
+        throw:{invalid_operation, {BadType, BadOp}} ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_body">>,
+                reason => iolist_to_binary([
+                    <<"Invalid operation on datatype '">>,
+                    to_bin(BadType),
+                    <<"': ">>,
+                    mochijson2:encode(BadOp),
+                    <<"\n">>
+                ])
+            }};
+        throw:{invalid_field_name, Field} ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_body">>,
+                reason => iolist_to_binary([
+                    <<"Invalid map field name '">>,
+                    Field,
+                    <<"'\n">>
+                ])
+            }};
+        throw:invalid_utf8 ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_body">>,
+                reason => <<"Malformed JSON submitted, invalid UTF-8">>
+            }};
+        _Class:Reason ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_body">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Couldn't decode JSON: ~p~n", [Reason]))
+            }}
+    end.
+
+crdt_response_body(Type, Mod, Obj, IncludeContext) ->
+    {{RespCtx, Value}, Stats} = riak_kv_crdt:value(Obj, Mod),
+    _ = [ok = riak_kv_stat:update(S) || S <- Stats],
+    ModMap = riak_kv_crdt:mod_map(Type),
+    Context = case IncludeContext of
+        true -> RespCtx;
+        false -> undefined
+    end,
+    mochijson2:encode(
+        riak_kv_crdt_json:fetch_response_to_json(Type, Value, Context, ModMap)).
+
+crdt_notfound_reply(Type, Deleted, VClock) ->
+    TypeBin = atom_to_binary(Type, utf8),
+    Body = mochijson2:encode({struct, [{<<"type">>, TypeBin}, {<<"error">>, <<"notfound">>}]}),
+    Reply0 = #{
+        status => 404,
+        body => Body,
+        content_type => <<"application/json; charset=utf-8">>
+    },
+    Reply1 = case Deleted of
+        true ->
+            Reply0#{headers => #{<<"x-riak-deleted">> => <<"true">>}};
+        false ->
+            Reply0
+    end,
+    case VClock of
+        undefined ->
+            Reply1;
+        _ ->
+            Reply1#{reply_opts => #{vclock => encode_vclock(VClock)}}
+    end.
+
+crdt_query_flag(Query, Key, Default) ->
+    case maps:get(Key, Query, Default) of
+        true -> true;
+        false -> false;
+        <<"true">> -> true;
+        <<"false">> -> false;
+        default -> Default;
+        <<"default">> -> Default;
+        _ -> Default
+    end.
+
+build_crdt_location(Context, Key) ->
+    Type = maps:get(bucket_type, Context, <<"default">>),
+    Bucket = maps:get(bucket, Context, <<>>),
+    <<"/types/", Type/binary, "/buckets/", Bucket/binary, "/datatypes/", Key/binary>>.
 
 index_operation(Context, Client) ->
     case build_index_request(Context) of

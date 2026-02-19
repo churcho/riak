@@ -178,6 +178,11 @@ normalize_buckets(Method, Tail, Query) ->
                 bucket => Bucket,
                 key => Key
             }};
+        [Bucket, <<"counters">>, Key] ->
+            {ok, (base_context(counter, buckets, Query))#{
+                bucket => Bucket,
+                key => Key
+            }};
         [Bucket, <<"query">>] ->
             {ok, (base_context(query, buckets, Query))#{bucket => Bucket}};
         [Bucket, <<"index">>, Field, Term] ->
@@ -220,6 +225,15 @@ normalize_types(Method, BucketType, Tail, Query) ->
             {ok, (base_context(Op, types, Query, BucketType))#{bucket => Bucket}};
         [<<"buckets">>, Bucket, <<"keys">>, Key] ->
             {ok, (base_context(object_item, types, Query, BucketType))#{
+                bucket => Bucket,
+                key => Key
+            }};
+        [<<"buckets">>, Bucket, <<"datatypes">>] ->
+            {ok, (base_context(crdt_collection, types, Query, BucketType))#{
+                bucket => Bucket
+            }};
+        [<<"buckets">>, Bucket, <<"datatypes">>, Key] ->
+            {ok, (base_context(crdt_item, types, Query, BucketType))#{
                 bucket => Bucket,
                 key => Key
             }};
@@ -317,6 +331,36 @@ ensure_allowed_query(Context) ->
 
 allowed_query_keys(keys) ->
     [<<"keys">>, <<"props">>, <<"timeout">>];
+allowed_query_keys(counter) ->
+    [
+        <<"r">>,
+        <<"pr">>,
+        <<"w">>,
+        <<"pw">>,
+        <<"dw">>,
+        <<"basic_quorum">>,
+        <<"notfound_ok">>,
+        <<"node_confirms">>,
+        <<"timeout">>,
+        <<"returnvalue">>
+    ];
+allowed_query_keys(crdt_item) ->
+    [
+        <<"r">>,
+        <<"pr">>,
+        <<"w">>,
+        <<"pw">>,
+        <<"dw">>,
+        <<"rw">>,
+        <<"basic_quorum">>,
+        <<"notfound_ok">>,
+        <<"node_confirms">>,
+        <<"timeout">>,
+        <<"include_context">>,
+        <<"returnbody">>
+    ];
+allowed_query_keys(crdt_collection) ->
+    allowed_query_keys(crdt_item);
 allowed_query_keys(query) ->
     [];
 allowed_query_keys(mapred) ->
@@ -399,6 +443,9 @@ allowed_methods(bucket_props, riak) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>];
 allowed_methods(bucket_props, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"DELETE">>];
 allowed_methods(bucket_type_props, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>];
 allowed_methods(keys, _) -> [<<"GET">>, <<"HEAD">>];
+allowed_methods(counter, _) -> [<<"GET">>, <<"POST">>];
+allowed_methods(crdt_item, _) -> [<<"GET">>, <<"HEAD">>, <<"POST">>];
+allowed_methods(crdt_collection, _) -> [<<"POST">>];
 allowed_methods(query, _) -> [<<"POST">>];
 allowed_methods(mapred, _) -> [<<"GET">>, <<"HEAD">>, <<"POST">>];
 allowed_methods(object_collection, _) -> [<<"POST">>];
