@@ -63,18 +63,23 @@ normalize(Req0, Opts) ->
 normalize_path(Method, Path0, Query) ->
     Path = to_binary(Path0),
     Query1 = ensure_stream_mode(Query),
-    Segments = path_segments(Path),
-    case Segments of
-        [<<"riak">> | Tail] -> normalize_riak(Method, Tail, Query1);
-        [<<"buckets">> | Tail] -> normalize_buckets(Method, Tail, Query1);
-        [<<"types">>, BucketType | Tail] ->
-            normalize_types(Method, BucketType, Tail, Query1);
-        _ ->
-            {error, #{
-                status => 404,
-                code => <<"unknown_route">>,
-                reason => <<"Route does not match Cowboy substrate aliases">>
-            }}
+    case validate_path_shape(Path) of
+        ok ->
+            Segments = path_segments(Path),
+            case Segments of
+                [<<"riak">> | Tail] -> normalize_riak(Method, Tail, Query1);
+                [<<"buckets">> | Tail] -> normalize_buckets(Method, Tail, Query1);
+                [<<"types">>, BucketType | Tail] ->
+                    normalize_types(Method, BucketType, Tail, Query1);
+                _ ->
+                    {error, #{
+                        status => 404,
+                        code => <<"unknown_route">>,
+                        reason => <<"Route does not match Cowboy substrate aliases">>
+                    }}
+            end;
+        {error, Error} ->
+            {error, Error}
     end.
 
 ensure_stream_mode(Query) ->
@@ -527,6 +532,24 @@ decode_qs_component(Component) ->
 path_segments(Path) ->
     [Segment || Segment <- binary:split(Path, <<"/">>, [global]),
                 Segment =/= <<>>].
+
+validate_path_shape(<<"/", _/binary>> = Path) ->
+    case binary:match(Path, <<"//">>) of
+        nomatch ->
+            ok;
+        _ ->
+            {error, #{
+                status => 404,
+                code => <<"unknown_route">>,
+                reason => <<"Unsupported path shape">>
+            }}
+    end;
+validate_path_shape(_) ->
+    {error, #{
+        status => 404,
+        code => <<"unknown_route">>,
+        reason => <<"Unsupported path shape">>
+    }}.
 
 alias_version(riak) -> 1;
 alias_version(buckets) -> 2;

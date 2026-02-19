@@ -78,6 +78,18 @@ handoff_notes:
 - `If-Match` and `If-Unmodified-Since` are carried through request input but are not yet enforced as explicit gateway-side condition checks in this batch.
 - Full legacy write-time Link-header validation/parsing is intentionally deferred; read-side compatibility link emission is implemented.
 
+## B02A Retro Cleanup Notes (2026-02-19)
+
+- Completed route matching and internal translation audit for active B01/B02 substrate routes:
+  - `docs/plans/artifacts/cowboy-route-mapping-audit-b01-b02.md`
+- Added edge-case tests for alias equivalence, malformed path-shape rejection, method allowlist/header contract, and path-to-action translation.
+- Parser now rejects malformed double-slash paths before normalization to avoid accidental acceptance of unsupported shapes.
+
+### Remaining risks after B02A
+
+- `normalize_path/3` includes forward-looking index route normalization branches that are not yet exposed by Cowboy route declarations; B04 must complete route/parser alignment for those paths.
+- Non-object route families still intentionally return `501 not_implemented`; B03/B04 remain responsible for replacing deferred dispatch with parity handlers.
+
 ## Sync-Back Command (required)
 
 After committing B02 in the worktree branch:

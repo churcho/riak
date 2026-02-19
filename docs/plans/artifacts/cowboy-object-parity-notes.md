@@ -66,6 +66,23 @@ Non-object substrate operations remain deferred and continue to return explicit 
 - `apps/riak_admin_api/test/riak_admin_api_request_test.erl`
   - boolean query normalization extended for `asis`
 
+## B02A route audit follow-up (2026-02-19)
+
+- Added cross-check artifact:
+  - `docs/plans/artifacts/cowboy-route-mapping-audit-b01-b02.md`
+- Added route audit tests for:
+  - alias equivalence across `/riak`, `/buckets`, and `/types`
+  - malformed path-shape rejection (`//`) with `404 unknown_route`
+  - method-not-allowed and `allow` header contract
+  - translation from external path + method to normalized op and backend action
+  - explicit verification that deferred non-object ops return `501 not_implemented`
+- Tightened parser discipline in `riak_admin_api_request:normalize_path/3` so malformed double-slash paths are rejected before op normalization.
+
+### B02A remaining risks
+
+- Forward-looking parser branches for index routes remain ahead of Cowboy route declarations and are intentionally deferred to B04.
+- B03/B04 must preserve current allowlist/error contract behavior while replacing deferred `501` branches with concrete handlers.
+
 ## Known deviations
 
 - `If-Match` and `If-Unmodified-Since` are forwarded through handler input but are not yet translated into explicit gateway-side conditional checks in B02.

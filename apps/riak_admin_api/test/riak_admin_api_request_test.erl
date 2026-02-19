@@ -23,6 +23,44 @@ normalize_alias_equivalence_test() ->
     ?assertEqual(Canonical, pick_canonical(BucketsReq)),
     ?assertEqual(Canonical, pick_canonical(TypesReq)).
 
+normalize_alias_roots_equivalence_test() ->
+    {ok, RiakReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/riak">>, #{}),
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/buckets">>, #{}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/default/buckets">>, #{}),
+
+    Canonical = #{
+        op => buckets,
+        bucket_type => <<"default">>,
+        bucket => undefined,
+        key => undefined
+    },
+
+    ?assertEqual(Canonical, pick_canonical(RiakReq)),
+    ?assertEqual(Canonical, pick_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_canonical(TypesReq)).
+
+normalize_collection_alias_equivalence_test() ->
+    {ok, RiakReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/riak/users">>, #{<<"props">> => <<"false">>}),
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/buckets/users/keys">>, #{}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/types/default/buckets/users/keys">>, #{}),
+
+    Canonical = #{
+        op => object_collection,
+        bucket_type => <<"default">>,
+        bucket => <<"users">>,
+        key => undefined
+    },
+
+    ?assertEqual(Canonical, pick_canonical(RiakReq)),
+    ?assertEqual(Canonical, pick_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_canonical(TypesReq)).
+
 normalize_legacy_riak_ambiguous_bucket_test() ->
     {ok, KeysReq} = riak_admin_api_request:normalize_path(
         <<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"stream">>}),
@@ -36,6 +74,35 @@ normalize_legacy_riak_ambiguous_bucket_test() ->
     {ok, CollectionReq} = riak_admin_api_request:normalize_path(
         <<"POST">>, <<"/riak/users">>, #{<<"props">> => <<"false">>}),
     ?assertEqual(object_collection, maps:get(op, CollectionReq)).
+
+normalize_unsupported_path_shapes_test_() ->
+    [
+        ?_assertMatch(
+            {error, #{status := 404, code := <<"unknown_route">>}},
+            riak_admin_api_request:normalize_path(
+                <<"GET">>, <<"/buckets//users/keys/alice">>, #{})),
+        ?_assertMatch(
+            {error, #{status := 404, code := <<"unknown_route">>}},
+            riak_admin_api_request:normalize_path(
+                <<"GET">>, <<"/types/default//buckets/users/keys/alice">>, #{})),
+        ?_assertMatch(
+            {error, #{status := 404, code := <<"unknown_route">>}},
+            riak_admin_api_request:normalize_path(
+                <<"GET">>, <<"/riak//users/alice">>, #{}))
+    ].
+
+normalize_method_not_allowed_includes_allow_contract_test() ->
+    Req0 = #{
+        method => <<"PATCH">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-405">>}
+    },
+    {error, Error, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(405, maps:get(status, Error)),
+    ?assertEqual(<<"method_not_allowed">>, maps:get(code, Error)),
+    ?assertEqual(
+        [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>],
+        maps:get(allow, Error)).
 
 normalize_query_boolean_and_quorum_test() ->
     Query0 = #{

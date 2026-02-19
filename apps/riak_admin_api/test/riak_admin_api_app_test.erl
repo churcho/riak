@@ -117,3 +117,35 @@ routes_include_cowboy_alias_families_test() ->
     ?assert(lists:member("/riak", Paths)),
     ?assert(lists:member("/buckets", Paths)),
     ?assert(lists:member("/types/:bucket_type/buckets", Paths)).
+
+routes_include_all_active_b01_b02_substrate_paths_test() ->
+    Routes = riak_admin_api_app:routes(),
+    Paths = [Path || {Path, Handler, _Opts} <- Routes, Handler =:= riak_admin_api_handler],
+    Expected = [
+        "/riak",
+        "/riak/:bucket",
+        "/riak/:bucket/:key",
+        "/buckets",
+        "/buckets/:bucket/props",
+        "/buckets/:bucket/keys",
+        "/buckets/:bucket/keys/:key",
+        "/types/:bucket_type/props",
+        "/types/:bucket_type/buckets",
+        "/types/:bucket_type/buckets/:bucket/props",
+        "/types/:bucket_type/buckets/:bucket/keys",
+        "/types/:bucket_type/buckets/:bucket/keys/:key"
+    ],
+    lists:foreach(fun(Path) ->
+        ?assert(lists:member(Path, Paths))
+    end, Expected).
+
+substrate_routes_define_route_family_metadata_test() ->
+    Routes = riak_admin_api_app:routes(),
+    SubstrateRoutes = [{Path, Opts} ||
+        {Path, Handler, Opts} <- Routes, Handler =:= riak_admin_api_handler],
+    ?assert(length(SubstrateRoutes) > 0),
+    lists:foreach(fun({_Path, Opts}) ->
+        ?assert(is_map(Opts)),
+        Family = maps:get(route_family, Opts, undefined),
+        ?assert(lists:member(Family, [riak, buckets, types]))
+    end, SubstrateRoutes).

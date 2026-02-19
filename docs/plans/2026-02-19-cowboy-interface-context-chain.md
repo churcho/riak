@@ -15,7 +15,7 @@ This file is the cross-branch handoff ledger for new context windows/agents.
 |---|---|---|---|---|---|---|
 | B00 | `feature/cowboy-b00-baseline-contracts` | 88a1df3f | TBD | TBD | In Progress | Artifacts drafted, contract test added, `./rebar3 eunit apps=riak_admin_api` passing |
 | B01 | `feature/cowboy-b01-http-substrate` | f241db0a | see_report_back_output | N/A (report-back) | Done | Added shared request/response substrate, alias routing, security/error policy artifacts, and passing eunit verification |
-| B02 | `feature/cowboy-b02-object-crud` | d4a71fbe | see_report_back_output | N/A (report-back) | Done | Implemented object CRUD dispatch/gateway parity path, added object parity artifact, and verified with `./rebar3 eunit apps=riak_admin_api` |
+| B02 | `feature/cowboy-b02-object-crud` | d4a71fbe | see_report_back_output | N/A (report-back) | Done | Implemented object CRUD dispatch/gateway parity path, added object parity artifact; B02A route audit added `docs/plans/artifacts/cowboy-route-mapping-audit-b01-b02.md`, strengthened alias/allowlist/translation tests, and flagged deferred index-route parser branches for B04 |
 | B03 | `feature/cowboy-b03-bucket-type` | TBD | TBD | TBD | Planned | Bucket and bucket-type endpoints |
 | B04 | `feature/cowboy-b04-keylist-2i` | TBD | TBD | TBD | Planned | Key listing and index endpoints |
 | B05 | `feature/cowboy-b05-query-mapred` | TBD | TBD | TBD | Planned | Query and mapreduce paths |
