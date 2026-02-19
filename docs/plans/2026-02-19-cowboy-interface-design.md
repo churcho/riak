@@ -47,6 +47,8 @@ Build a production-grade, performant Cowboy interface for Riak data-path and adm
    - Add metrics and latency/error budgets before Webmachine retirement.
 6. Safe rollout:
    - Feature flags and endpoint-level fallback during migration.
+7. Route/parser lockstep:
+   - Every external route change must include Cowboy route wiring, parser normalization, method/query validation, and internal gateway mapping with tests proving end-to-end translation.
 
 ## 5) What is missing
 
@@ -80,6 +82,8 @@ This plan is intentionally sequential so each branch builds on previous outcomes
   - parity acceptance criteria,
   - rollback/fallback plan,
   - verification commands and expected evidence.
+- For route-affecting work, follow:
+  - `docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
 
 ## 8) Handoff mechanism for new context windows
 

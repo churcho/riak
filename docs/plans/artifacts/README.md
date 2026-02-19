@@ -11,5 +11,6 @@ Expected examples:
 - contract harness/performance reports
 - cutover/rollback runbooks
 - deferred-track ADRs and multi-DC distribution specs
+- Cowboy route matching/parser discipline guidance
 
 Each artifact should be referenced by at least one batch `Context Capsule` and the context chain row.

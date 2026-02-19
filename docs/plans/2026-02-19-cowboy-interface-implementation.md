@@ -12,6 +12,9 @@
 
 `git -C "/Users/abogec/open-riak/riak" checkout feature/cowboy-client && git -C "/Users/abogec/open-riak/riak" cherry-pick <BATCH_COMMIT_SHA>`
 
+**Route Matching Rule (mandatory):** For any route additions/changes, apply
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md` and include route matching evidence in batch artifacts.
+
 ---
 
 ### Task 1: Create branch/worktree chain and baseline artifacts (B00)

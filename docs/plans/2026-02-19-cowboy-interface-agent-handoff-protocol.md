@@ -17,6 +17,8 @@ If working deferred multi-DC track:
 - Confirm previous batch status is `Done` in context chain.
 - Confirm base commit from context chain before creating branch.
 - Confirm expected artifact inputs from previous batch exist.
+- If batch touches routes, read:
+  - `docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
 
 ## End-of-batch closeout checklist
 
@@ -26,7 +28,8 @@ If working deferred multi-DC track:
 3. Add/refresh artifact docs referenced by batch deliverables.
 4. Sync batch commit into `feature/cowboy-client` immediately:
    - `git -C "/Users/abogec/open-riak/riak" checkout feature/cowboy-client && git -C "/Users/abogec/open-riak/riak" cherry-pick <BATCH_COMMIT_SHA>`
-5. Add "Known deviations" section if any parity/perf target is not met.
+5. If routes changed, include Route Matching Evidence in the batch artifact notes.
+6. Add "Known deviations" section if any parity/perf target is not met.
 
 ## Standard context capsule schema
 

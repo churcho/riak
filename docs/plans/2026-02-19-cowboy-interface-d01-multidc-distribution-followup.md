@@ -91,6 +91,18 @@ When D01 starts in a fresh context window, read in order:
 
 Then create a dedicated D01 plan before coding.
 
+## Route Matching and Parser Discipline (required)
+
+If D01 introduces or changes public API paths, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+D01 artifacts must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## Sync-Back Command (required)
 
 After committing D01 work in the worktree branch:

@@ -61,6 +61,18 @@ handoff_notes:
   - B06 should retain error taxonomy used here
 ```
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B05 artifact notes must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## Sync-Back Command (required)
 
 After committing B05 in the worktree branch:

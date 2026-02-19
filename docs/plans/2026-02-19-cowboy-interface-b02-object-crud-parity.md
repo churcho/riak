@@ -78,6 +78,18 @@ handoff_notes:
 - `If-Match` and `If-Unmodified-Since` are carried through request input but are not yet enforced as explicit gateway-side condition checks in this batch.
 - Full legacy write-time Link-header validation/parsing is intentionally deferred; read-side compatibility link emission is implemented.
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B02 artifact notes must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## B02A Retro Cleanup Notes (2026-02-19)
 
 - Completed route matching and internal translation audit for active B01/B02 substrate routes:

@@ -65,6 +65,18 @@ handoff_notes:
   - B04 must follow same streaming envelope decisions
 ```
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B03 artifact notes must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## Sync-Back Command (required)
 
 After committing B03 in the worktree branch:

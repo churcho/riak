@@ -45,3 +45,11 @@ Reference doc:
 After committing a batch in its worktree branch, sync it into `feature/cowboy-client` immediately:
 
 `git -C "/Users/abogec/open-riak/riak" checkout feature/cowboy-client && git -C "/Users/abogec/open-riak/riak" cherry-pick <BATCH_COMMIT_SHA>`
+
+## Required route-matching instruction (every route-affecting batch)
+
+For any batch that introduces or changes public paths, apply:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+Batch artifact notes must include Route Matching Evidence (external path -> normalized op -> internal gateway call + test references).

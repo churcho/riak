@@ -68,6 +68,14 @@ handoff_notes:
   - next optional track: D01 multi-DC distribution follow-up
 ```
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes during cutover hardening, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B08 artifact notes must include Route Matching Evidence for any path moved, disabled, or remapped.
+
 ## Sync-Back Command (required)
 
 After committing B08 in the worktree branch:

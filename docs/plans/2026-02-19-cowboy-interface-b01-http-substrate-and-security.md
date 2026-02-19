@@ -75,6 +75,18 @@ handoff_notes:
   - Preserve alias route wiring in `riak_admin_api_app:substrate_routes/0`; only replace `501` flow with op dispatch.
 ```
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B01/B02 artifact notes must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## Sync-Back Command (required)
 
 After committing B01 in the worktree branch:

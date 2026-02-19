@@ -68,6 +68,18 @@ handoff_notes:
   - B08 should only proceed if release gates are met
 ```
 
+## Route Matching and Parser Discipline (required)
+
+For any route additions/changes, follow:
+
+`docs/plans/artifacts/cowboy-route-matching-and-parser-discipline.md`
+
+B07 artifact notes must include Route Matching Evidence:
+- external path template,
+- normalized operation id,
+- internal gateway call/action,
+- tests that prove mapping.
+
 ## Sync-Back Command (required)
 
 After committing B07 in the worktree branch:
