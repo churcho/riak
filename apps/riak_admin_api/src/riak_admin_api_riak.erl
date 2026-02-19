@@ -218,7 +218,7 @@ bucket_operation(get_bucket_type_props, Context, _Input, _Client) ->
             {error, object_error_map(bucket_type_unknown)};
         Props ->
             JsonProps = [riak_kv_wm_utils:jsonify_bucket_prop(P) || P <- Props],
-            Body = mochijson2:encode({struct, [{?JSON_PROPS, JsonProps}]}),
+            Body = mochijson2:encode({struct, [{?JSON_PROPS, {struct, JsonProps}}]}),
             {ok, json_backend_reply(200, Body)}
     end;
 bucket_operation(set_bucket_type_props, Context, Input, _Client) ->
@@ -1525,7 +1525,7 @@ stream_index_reply(Request, Client) ->
     Opts = maps:get(opts, Request),
     ReturnTerms = maps:get(return_terms, Request),
     MaxResults = maps:get(max_results, Request),
-    Boundary = riak_core_util:unique_id_62(),
+    Boundary = list_to_binary(riak_core_util:unique_id_62()),
     case riak_client:stream_get_index(Bucket, Query, Opts, Client) of
         {ok, ReqId, FSMPid} ->
             Timeout = proplists:get_value(timeout, Opts, infinity),
@@ -2034,7 +2034,7 @@ mapred_collect_nonchunked_reply(Mrc, ParsedQuery) ->
     end.
 
 mapred_collect_chunked_reply(Mrc, ParsedQuery) ->
-    Boundary = riak_core_util:unique_id_62(),
+    Boundary = list_to_binary(riak_core_util:unique_id_62()),
     HasMRQuery = ParsedQuery =/= [],
     case mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, []) of
         {ok, Body} ->
@@ -2365,6 +2365,7 @@ round_pct(Count, Total) ->
 -spec to_bin(term()) -> binary().
 to_bin(V) when is_binary(V) -> V;
 to_bin(V) when is_atom(V) -> atom_to_binary(V, utf8);
+to_bin(V) when is_integer(V) -> integer_to_binary(V);
 to_bin(V) when is_list(V) -> list_to_binary(V);
 to_bin(V) -> iolist_to_binary(io_lib:format("~p", [V])).
 
@@ -2561,6 +2562,8 @@ to_bin_test_() ->
          fun() -> ?assertEqual(<<"hello">>, to_bin(<<"hello">>)) end},
         {"atom conversion",
          fun() -> ?assertEqual(<<"ok">>, to_bin(ok)) end},
+        {"integer conversion",
+         fun() -> ?assertEqual(<<"42">>, to_bin(42)) end},
         {"list conversion",
          fun() -> ?assertEqual(<<"hello">>, to_bin("hello")) end}
     ]}.

@@ -488,7 +488,7 @@ ensure_cutover(Context, Opts) ->
 resolve_cutover_mode(Op, Opts) ->
     DefaultMode = normalize_cutover_mode(
         maps:get(cutover_default_mode, Opts, enabled)),
-    Modes = maps:get(cutover_op_modes, Opts, #{}),
+    Modes = maps:get(cutover_op_modes, Opts, []),
     case lookup_cutover_mode(Op, Modes) of
         undefined -> DefaultMode;
         Mode -> normalize_cutover_mode(Mode)
