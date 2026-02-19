@@ -75,10 +75,12 @@
 -endif.
 
 -include_lib("riak_kv/src/riak_kv_wm_raw.hrl").
+-include_lib("riak_kv/include/riak_kv_index.hrl").
 
 -define(USERMETA_PREFIX, <<"x-riak-meta-">>).
 -define(INDEX_PREFIX, <<"x-riak-index-">>).
 -define(DEFAULT_BUCKET_LIST_TIMEOUT, 5 * 60000).
+-define(DEFAULT_KEY_STREAM_TIMEOUT, 5000).
 
 %% Types
 -export_type([dc_info/0]).
@@ -134,7 +136,9 @@ object_operation(_, _Context, _Input, _Client) ->
     delete_bucket_props |
     get_bucket_type_props |
     set_bucket_type_props |
-    list_buckets,
+    list_buckets |
+    list_keys |
+    index_query,
     map(),
     map()) -> {ok, map()} | {error, map()}.
 bucket_operation(Action, Context, Input) ->
@@ -194,6 +198,10 @@ bucket_operation(set_bucket_type_props, Context, Input, _Client) ->
     end;
 bucket_operation(list_buckets, Context, _Input, Client) ->
     bucket_list_operation(Context, Client);
+bucket_operation(list_keys, Context, _Input, Client) ->
+    key_list_operation(Context, Client);
+bucket_operation(index_query, Context, _Input, Client) ->
+    index_operation(Context, Client);
 bucket_operation(_, _Context, _Input, _Client) ->
     {error, #{
         status => 400,
@@ -902,6 +910,344 @@ encode_bucket_list(Buckets) ->
 
 encode_bucket_stream_timeout() ->
     mochijson2:encode({struct, [{error, timeout}]}).
+
+key_list_operation(Context, Client) ->
+    Query = maps:get(query, Context, #{}),
+    Bucket = bucket_ref(Context),
+    Timeout = maps:get(<<"timeout">>, Query, undefined),
+    BucketPropsJson = key_list_bucket_props(Context, Query, Bucket, Client),
+    case maps:get(<<"keys">>, Query, undefined) of
+        <<"stream">> ->
+            stream_keys_reply(Bucket, Timeout, BucketPropsJson, Context, Client);
+        true ->
+            list_keys_reply(Bucket, Timeout, BucketPropsJson, Client);
+        <<"true">> ->
+            list_keys_reply(Bucket, Timeout, BucketPropsJson, Client);
+        _ ->
+            {ok, json_backend_reply(200, mochijson2:encode({struct, BucketPropsJson}))}
+    end.
+
+key_list_bucket_props(Context, Query, Bucket, Client) ->
+    case key_list_include_props(Context, Query) of
+        true ->
+            [riak_kv_wm_props:get_bucket_props_json(Client, Bucket)];
+        false ->
+            []
+    end.
+
+key_list_include_props(Context, Query) ->
+    maps:get(alias, Context, buckets) =:= riak andalso key_list_props_enabled(Query).
+
+key_list_props_enabled(Query) ->
+    case maps:get(<<"props">>, Query, undefined) of
+        false -> false;
+        <<"false">> -> false;
+        _ -> true
+    end.
+
+list_keys_reply(Bucket, Timeout, BucketPropsJson, Client) ->
+    case riak_client:list_keys(Bucket, Timeout, Client) of
+        {ok, KeyList} ->
+            Body = mochijson2:encode({struct, BucketPropsJson ++ [{?JSON_KEYS, KeyList}]}),
+            {ok, json_backend_reply(200, Body)};
+        {error, Reason} ->
+            Body = mochijson2:encode({struct, BucketPropsJson ++ [{error, Reason}]}),
+            {ok, json_backend_reply(200, Body)}
+    end.
+
+stream_keys_reply(Bucket, Timeout0, BucketPropsJson, Context, Client) ->
+    case riak_client:stream_list_keys(Bucket, Timeout0, Client) of
+        {ok, ReqId} ->
+            FirstChunk = case maps:get(api_version, Context, 2) of
+                1 -> mochijson2:encode({struct, BucketPropsJson});
+                _ -> <<>>
+            end,
+            Timeout = key_stream_timeout(Timeout0),
+            Body = iolist_to_binary([FirstChunk, collect_stream_keys(ReqId, [], Timeout)]),
+            {ok, json_backend_reply(200, Body)};
+        {error, Reason} ->
+            {error, bucket_error_map(Reason)}
+    end.
+
+key_stream_timeout(undefined) ->
+    ?DEFAULT_KEY_STREAM_TIMEOUT;
+key_stream_timeout(infinity) ->
+    infinity;
+key_stream_timeout(Timeout) when is_integer(Timeout), Timeout >= 0 ->
+    Timeout;
+key_stream_timeout(_) ->
+    ?DEFAULT_KEY_STREAM_TIMEOUT.
+
+collect_stream_keys(ReqId, Acc, Timeout) ->
+    receive
+        {ReqId, done} ->
+            iolist_to_binary(lists:reverse([encode_key_list([]) | Acc]));
+        {ReqId, From, {keys, Keys}} ->
+            _ = riak_kv_keys_fsm:ack_keys(From),
+            collect_stream_keys(ReqId, [encode_key_list(Keys) | Acc], Timeout);
+        {ReqId, {keys, Keys}} ->
+            collect_stream_keys(ReqId, [encode_key_list(Keys) | Acc], Timeout);
+        {ReqId, {error, timeout}} ->
+            iolist_to_binary(lists:reverse([encode_key_stream_timeout() | Acc]));
+        {ReqId, {error, Reason}} ->
+            iolist_to_binary(lists:reverse([encode_key_stream_error(Reason) | Acc]))
+    after Timeout ->
+        iolist_to_binary(lists:reverse([encode_key_stream_timeout() | Acc]))
+    end.
+
+encode_key_list(Keys) ->
+    mochijson2:encode({struct, [{?JSON_KEYS, Keys}]}).
+
+encode_key_stream_timeout() ->
+    mochijson2:encode({struct, [{error, timeout}]}).
+
+encode_key_stream_error(Reason) ->
+    mochijson2:encode({struct, [{error, Reason}]}).
+
+index_operation(Context, Client) ->
+    case build_index_request(Context) of
+        {ok, Request} ->
+            case maps:get(streamed, Request, false) of
+                true -> stream_index_reply(Request, Client);
+                false -> list_index_reply(Request, Client)
+            end;
+        {error, Error} ->
+            {error, Error}
+    end.
+
+build_index_request(Context) ->
+    Query = maps:get(query, Context, #{}),
+    Field = maps:get(field, Context, undefined),
+    {Start, End, IsEqualOp} = index_terms(Context),
+    InternalReturnTerms = not (IsEqualOp orelse Field =:= <<"$field">>),
+    ReturnTermsInput = normalize_boolean_query(maps:get(<<"return_terms">>, Query, false), false),
+    Continuation = maps:get(<<"continuation">>, Query, undefined),
+    TermRegex = maps:get(<<"term_regex">>, Query, undefined),
+    MaxResults = maps:get(<<"max_results">>, Query, all),
+    Streamed = normalize_boolean_query(maps:get(<<"stream">>, Query, false), false),
+    PaginationSort0 = case maps:get(<<"pagination_sort">>, Query, undefined) of
+        undefined -> undefined;
+        Value -> normalize_boolean_query(Value, false)
+    end,
+    PaginationSort = case Continuation of
+        undefined -> PaginationSort0;
+        _ -> true
+    end,
+    Timeout = maps:get(<<"timeout">>, Query, undefined),
+    QueryArgs0 = [
+        {field, Field},
+        {start_term, Start},
+        {end_term, End},
+        {return_terms, InternalReturnTerms},
+        {continuation, Continuation},
+        {term_regex, TermRegex}
+    ],
+    QueryArgs = case MaxResults of
+        all -> QueryArgs0;
+        _ -> QueryArgs0 ++ [{max_results, MaxResults}]
+    end,
+    case catch riak_index:to_index_query(QueryArgs) of
+        {ok, IndexQuery} ->
+            case validate_index_term_regex(TermRegex, IndexQuery) of
+                ok ->
+                    ReturnTerms = riak_index:return_terms(ReturnTermsInput, IndexQuery),
+                    Opts0 = [{max_results, MaxResults}] ++
+                        [{pagination_sort, PaginationSort} || PaginationSort =/= undefined],
+                    Opts = riak_index:add_timeout_opt(Timeout, Opts0),
+                    {ok, #{
+                        bucket => bucket_ref(Context),
+                        query => IndexQuery,
+                        opts => Opts,
+                        return_terms => ReturnTerms,
+                        streamed => Streamed,
+                        max_results => MaxResults
+                    }};
+                {error, Error} ->
+                    {error, Error}
+            end;
+        {error, Reason} ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => iolist_to_binary(io_lib:format("Invalid query: ~p", [Reason]))
+            }};
+        {'EXIT', Reason} ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => iolist_to_binary(io_lib:format("Invalid query: ~p", [Reason]))
+            }}
+    end.
+
+index_terms(Context) ->
+    case maps:get(range, Context, undefined) of
+        {Start, End} ->
+            {Start, End, false};
+        undefined ->
+            Extras = maps:get(extras, Context, #{}),
+            Term = maps:get(term, Extras, undefined),
+            {Term, Term, true}
+    end.
+
+validate_index_term_regex(undefined, _IndexQuery) ->
+    ok;
+validate_index_term_regex(TermRegex, IndexQuery) ->
+    case re:compile(TermRegex) of
+        {ok, _Compiled} ->
+            case IndexQuery of
+                ?KV_INDEX_Q{start_term=StartTerm} when is_integer(StartTerm) ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_query">>,
+                        reason => <<"Can not use term regular expressions on integer queries">>
+                    }};
+                _ ->
+                    ok
+            end;
+        {error, ReError} ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Invalid term regular expression ~p : ~p", [TermRegex, ReError]))
+            }}
+    end.
+
+list_index_reply(Request, Client) ->
+    Bucket = maps:get(bucket, Request),
+    Query = maps:get(query, Request),
+    Opts = maps:get(opts, Request),
+    ReturnTerms = maps:get(return_terms, Request),
+    MaxResults = maps:get(max_results, Request),
+    case riak_client:get_index(Bucket, Query, Opts, Client) of
+        {ok, Results} ->
+            Continuation = make_index_continuation(MaxResults, Results, length(Results)),
+            Body = riak_kv_wm_index:encode_results(ReturnTerms, Results, Continuation),
+            {ok, json_backend_reply(200, iolist_to_binary(Body))};
+        {error, timeout} ->
+            {error, object_error_map(timeout)};
+        {error, Reason} ->
+            {error, bucket_error_map(Reason)}
+    end.
+
+stream_index_reply(Request, Client) ->
+    Bucket = maps:get(bucket, Request),
+    Query = maps:get(query, Request),
+    Opts = maps:get(opts, Request),
+    ReturnTerms = maps:get(return_terms, Request),
+    MaxResults = maps:get(max_results, Request),
+    Boundary = riak_core_util:unique_id_62(),
+    case riak_client:stream_get_index(Bucket, Query, Opts, Client) of
+        {ok, ReqId, FSMPid} ->
+            Timeout = proplists:get_value(timeout, Opts, infinity),
+            Body = collect_stream_index(
+                ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout, undefined, 0, []),
+            {ok, #{
+                status => 200,
+                body => Body,
+                content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+            }};
+        {error, Reason} ->
+            {error, bucket_error_map(Reason)}
+    end.
+
+collect_stream_index(ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout, LastResult, Count, Acc) ->
+    receive
+        {ReqId, done} ->
+            Final = index_stream_final(Boundary, MaxResults, LastResult, Count),
+            iolist_to_binary(lists:reverse([Final | Acc]));
+        {ReqId, {results, []}} ->
+            collect_stream_index(
+                ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout, LastResult, Count, Acc);
+        {ReqId, {results, Results}} ->
+            JsonResults = riak_kv_wm_index:encode_results(ReturnTerms, Results),
+            Part = [
+                "\r\n--", Boundary, "\r\n",
+                "Content-Type: application/json\r\n\r\n",
+                JsonResults
+            ],
+            LastResult1 = index_last_result(Results),
+            Count1 = Count + length(Results),
+            collect_stream_index(
+                ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout,
+                LastResult1, Count1, [Part | Acc]);
+        {ReqId, Error} ->
+            iolist_to_binary(lists:reverse([index_stream_error(Boundary, Error) | Acc]))
+    after Timeout ->
+        whack_index_fsm(ReqId, FSMPid),
+        iolist_to_binary(lists:reverse([index_stream_error(Boundary, {error, timeout}) | Acc]))
+    end.
+
+index_stream_final(Boundary, MaxResults, LastResult, Count) ->
+    case make_index_continuation(MaxResults, [LastResult], Count) of
+        undefined ->
+            ["\r\n--", Boundary, "--\r\n"];
+        Continuation ->
+            Json = mochijson2:encode({struct, [{?Q_2I_CONTINUATION_BIN, Continuation}]}),
+            [
+                "\r\n--", Boundary, "\r\n",
+                "Content-Type: application/json\r\n\r\n",
+                Json,
+                "\r\n--", Boundary, "--\r\n"
+            ]
+    end.
+
+index_stream_error(Boundary, Error) ->
+    ErrorJson = encode_index_error(Error),
+    [
+        "\r\n--", Boundary, "\r\n",
+        "Content-Type: application/json\r\n\r\n",
+        ErrorJson,
+        "\r\n--", Boundary, "--\r\n"
+    ].
+
+encode_index_error({error, E}) ->
+    encode_index_error(E);
+encode_index_error(Error) when is_atom(Error); is_binary(Error) ->
+    mochijson2:encode({struct, [{error, Error}]});
+encode_index_error(Error) ->
+    Value = iolist_to_binary(io_lib:format("~p", [Error])),
+    mochijson2:encode({struct, [{error, Value}]}).
+
+whack_index_fsm(ReqId, Pid) when is_pid(Pid) ->
+    wait_for_death(Pid),
+    clear_index_fsm_msgs(ReqId);
+whack_index_fsm(_ReqId, _Pid) ->
+    ok.
+
+wait_for_death(Pid) ->
+    Ref = erlang:monitor(process, Pid),
+    exit(Pid, kill),
+    receive
+        {'DOWN', Ref, process, Pid, _Info} ->
+            ok
+    end.
+
+clear_index_fsm_msgs(ReqId) ->
+    receive
+        {ReqId, _} ->
+            clear_index_fsm_msgs(ReqId)
+    after
+        0 ->
+            ok
+    end.
+
+index_last_result([]) ->
+    undefined;
+index_last_result(Results) ->
+    lists:last(Results).
+
+make_index_continuation(MaxResults, Results, MaxResults) when MaxResults =/= all ->
+    riak_index:make_continuation(Results);
+make_index_continuation(_, _, _) ->
+    undefined.
+
+normalize_boolean_query(Value, Default) ->
+    case normalize_boolean(Value) of
+        true -> true;
+        false -> false;
+        _ -> Default
+    end.
 
 %%% ============================================================
 %%% Cluster Status

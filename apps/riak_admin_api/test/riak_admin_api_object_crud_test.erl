@@ -225,15 +225,6 @@ keys_method_not_allowed_allow_header_contract_test() ->
     Decoded = jsx:decode(Body, [return_maps]),
     ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)).
 
-deferred_b04_routes_return_not_implemented_test_() ->
-    Cases = [
-        {<<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"true">>}, keys},
-        {<<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"stream">>}, keys},
-        {<<"GET">>, <<"/buckets/users/keys">>, #{}, keys},
-        {<<"GET">>, <<"/types/maps/buckets/users/keys">>, #{}, keys}
-    ],
-    [?_test(assert_deferred_route_case(Case)) || Case <- Cases].
-
 assert_backend_action_case(
         {Method, Path, Query, ExpectedOp, ExpectedAlias, ExpectedAction, Body}) ->
     StreamID = {route_translate, Method, Path},
@@ -278,39 +269,6 @@ assert_backend_action_case(
 
     {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
     ?assertEqual(204, Status).
-
-assert_deferred_route_case({Method, Path, Query, ExpectedOp}) ->
-    {ok, Context} = riak_admin_api_request:normalize_path(Method, Path, Query),
-    ?assertEqual(ExpectedOp, maps:get(op, Context)),
-    StreamID = {deferred_route, Method, Path},
-    Parent = self(),
-    Backend = fun(_Action, _BackendContext, _Input) ->
-        Parent ! {unexpected_backend_call, Method, Path},
-        {ok, #{status => 204, body => <<>>, content_type => <<"application/json; charset=utf-8">>}}
-    end,
-    Req0 = #{
-        method => Method,
-        path => Path,
-        query => Query,
-        headers => #{<<"x-request-id">> => <<"rid-deferred">>},
-        pid => Parent,
-        streamid => StreamID
-    },
-    {ok, _Req1, _State} = riak_admin_api_handler:init(
-        Req0,
-        #{route_family => route_family(Path), object_backend => Backend}),
-
-    receive
-        {unexpected_backend_call, Method, Path} ->
-            ?assert(false)
-    after 50 ->
-        ok
-    end,
-
-    {Status, _Headers, Body} = receive_response_for_stream(StreamID),
-    ?assertEqual(501, Status),
-    Decoded = jsx:decode(Body, [return_maps]),
-    ?assertEqual(<<"not_implemented">>, maps:get(<<"error">>, Decoded)).
 
 route_family(<<"/riak", _/binary>>) -> riak;
 route_family(<<"/buckets", _/binary>>) -> buckets;

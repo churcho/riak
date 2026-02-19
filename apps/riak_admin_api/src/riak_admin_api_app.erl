@@ -209,6 +209,10 @@ substrate_routes() ->
         {"/buckets", riak_admin_api_handler, #{route_family => buckets}},
         {"/buckets/:bucket/props", riak_admin_api_handler, #{route_family => buckets}},
         {"/buckets/:bucket/keys", riak_admin_api_handler, #{route_family => buckets}},
+        {"/buckets/:bucket/index/:field/:term", riak_admin_api_handler,
+            #{route_family => buckets}},
+        {"/buckets/:bucket/index/:field/:start/:end", riak_admin_api_handler,
+            #{route_family => buckets}},
         {"/buckets/:bucket/keys/:key", riak_admin_api_handler,
             #{route_family => buckets}},
 
@@ -220,6 +224,10 @@ substrate_routes() ->
         {"/types/:bucket_type/buckets/:bucket/props", riak_admin_api_handler,
             #{route_family => types}},
         {"/types/:bucket_type/buckets/:bucket/keys", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/index/:field/:term", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/index/:field/:start/:end", riak_admin_api_handler,
             #{route_family => types}},
         {"/types/:bucket_type/buckets/:bucket/keys/:key", riak_admin_api_handler,
             #{route_family => types}}

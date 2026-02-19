@@ -117,6 +117,33 @@ normalize_legacy_riak_ambiguous_bucket_test() ->
         <<"POST">>, <<"/riak/users">>, #{<<"props">> => <<"false">>}),
     ?assertEqual(object_collection, maps:get(op, CollectionReq)).
 
+normalize_index_alias_equivalence_test() ->
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/buckets/users/index/email_bin/alice">>, #{}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/maps/buckets/users/index/email_bin/alice">>, #{}),
+
+    Canonical = #{
+        op => index_query,
+        bucket_type => <<"maps">>,
+        bucket => <<"users">>,
+        field => <<"email_bin">>,
+        range => undefined,
+        extras => #{term => <<"alice">>}
+    },
+
+    ?assertEqual(Canonical#{bucket_type => <<"default">>}, pick_index_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_index_canonical(TypesReq)).
+
+normalize_index_range_path_test() ->
+    {ok, Req} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/maps/buckets/users/index/age_int/10/20">>, #{}),
+    ?assertEqual(index_query, maps:get(op, Req)),
+    ?assertEqual(<<"maps">>, maps:get(bucket_type, Req)),
+    ?assertEqual(<<"users">>, maps:get(bucket, Req)),
+    ?assertEqual(<<"age_int">>, maps:get(field, Req)),
+    ?assertEqual({<<"10">>, <<"20">>}, maps:get(range, Req)).
+
 normalize_unsupported_path_shapes_test_() ->
     [
         ?_assertMatch(
@@ -163,11 +190,65 @@ normalize_query_boolean_and_quorum_test() ->
     ?assertEqual(2, maps:get(<<"w">>, Query)),
     ?assertEqual(5000, maps:get(<<"timeout">>, Query)).
 
+normalize_query_index_flags_and_max_results_test() ->
+    Query0 = #{
+        <<"max_results">> => <<"50">>,
+        <<"return_terms">> => <<"true">>,
+        <<"pagination_sort">> => <<"false">>,
+        <<"stream">> => <<"true">>,
+        <<"timeout">> => <<"2500">>
+    },
+    {ok, Query} = riak_admin_api_request:normalize_query(Query0),
+    ?assertEqual(50, maps:get(<<"max_results">>, Query)),
+    ?assertEqual(true, maps:get(<<"return_terms">>, Query)),
+    ?assertEqual(false, maps:get(<<"pagination_sort">>, Query)),
+    ?assertEqual(true, maps:get(<<"stream">>, Query)),
+    ?assertEqual(index, maps:get(stream_mode, Query)),
+    ?assertEqual(2500, maps:get(<<"timeout">>, Query)).
+
+normalize_query_invalid_max_results_test() ->
+    {error, Err} = riak_admin_api_request:normalize_query(
+        #{<<"max_results">> => <<"0">>}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)).
+
 normalize_query_invalid_boolean_test() ->
     {error, Err} = riak_admin_api_request:normalize_query(
         #{<<"stream">> => <<"not-a-bool">>}),
     ?assertEqual(400, maps:get(status, Err)),
     ?assertEqual(<<"invalid_query">>, maps:get(code, Err)).
+
+normalize_keys_query_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
+
+normalize_keys_query_invalid_mode_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys">>,
+        query => #{<<"keys">> => <<"invalid">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)).
+
+normalize_index_query_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/index/email_bin/alice">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
 
 request_id_propagates_from_header_test() ->
     {ok, Headers} = riak_admin_api_request:normalize_headers(
@@ -208,4 +289,14 @@ pick_canonical(Context) ->
         bucket_type => maps:get(bucket_type, Context),
         bucket => maps:get(bucket, Context),
         key => maps:get(key, Context)
+    }.
+
+pick_index_canonical(Context) ->
+    #{
+        op => maps:get(op, Context),
+        bucket_type => maps:get(bucket_type, Context),
+        bucket => maps:get(bucket, Context),
+        field => maps:get(field, Context),
+        range => maps:get(range, Context),
+        extras => maps:get(extras, Context)
     }.

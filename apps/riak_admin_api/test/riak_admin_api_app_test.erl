@@ -118,7 +118,7 @@ routes_include_cowboy_alias_families_test() ->
     ?assert(lists:member("/buckets", Paths)),
     ?assert(lists:member("/types/:bucket_type/buckets", Paths)).
 
-routes_include_all_active_b01_b02_substrate_paths_test() ->
+routes_include_all_active_substrate_paths_test() ->
     Routes = riak_admin_api_app:routes(),
     Paths = [Path || {Path, Handler, _Opts} <- Routes, Handler =:= riak_admin_api_handler],
     Expected = [
@@ -129,11 +129,15 @@ routes_include_all_active_b01_b02_substrate_paths_test() ->
         "/buckets/:bucket/props",
         "/buckets/:bucket/keys",
         "/buckets/:bucket/keys/:key",
+        "/buckets/:bucket/index/:field/:term",
+        "/buckets/:bucket/index/:field/:start/:end",
         "/types/:bucket_type/props",
         "/types/:bucket_type/buckets",
         "/types/:bucket_type/buckets/:bucket/props",
         "/types/:bucket_type/buckets/:bucket/keys",
-        "/types/:bucket_type/buckets/:bucket/keys/:key"
+        "/types/:bucket_type/buckets/:bucket/keys/:key",
+        "/types/:bucket_type/buckets/:bucket/index/:field/:term",
+        "/types/:bucket_type/buckets/:bucket/index/:field/:start/:end"
     ],
     lists:foreach(fun(Path) ->
         ?assert(lists:member(Path, Paths))

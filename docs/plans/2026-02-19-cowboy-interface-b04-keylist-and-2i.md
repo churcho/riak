@@ -50,19 +50,23 @@ Migrate key listing and 2i endpoints with correct streaming, continuation, and t
 
 ```yaml
 batch: B04
-status: planned
+status: done
 branch: feature/cowboy-b04-keylist-2i
-base_commit: TBD
-end_commit: TBD
+base_commit: 3860928b
+end_commit: see_report_back_output
 artifacts:
   - docs/plans/artifacts/cowboy-keylist-2i-parity-notes.md
 decisions:
-  - TBD
+  - Added Cowboy route declarations for `/buckets/.../index/...` and `/types/.../index/...` so route matching and parser normalization stay in lockstep for B04.
+  - Replaced deferred handler branches with concrete dispatch for `keys` and `index_query`, mapped to `riak_admin_api_riak:bucket_operation(list_keys|index_query, ...)`.
+  - Added B04-specific query allowlist and coercion (`max_results`, key/index parameter families) to enforce method/query validation parity.
+  - Implemented key-list and 2i stream compatibility as aggregated envelope responses (JSON key chunks and multipart index parts) consistent with current migration-stage transport behavior.
 open_risks:
-  - multipart stream compatibility for old clients
-  - continuation token stability
+  - Stream responses remain aggregated in-memory payloads; true backpressure-aware chunk flushing is deferred.
+  - 2i continuation semantics rely on existing `riak_index` continuation behavior and should be load-validated under large result sets in B07.
 handoff_notes:
-  - B05 should reuse 2i timeout and stream helpers
+  - B05 should reuse the B04 query validation/allowlist discipline and stream-envelope helper patterns for query/mapreduce endpoints.
+  - B05 should not alter B04 route normalization contracts for `/riak`, `/buckets`, and `/types` alias families.
 ```
 
 ## Route Matching and Parser Discipline (required)

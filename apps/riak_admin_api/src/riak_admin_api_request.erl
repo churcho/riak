@@ -43,16 +43,21 @@ normalize(Req0, Opts) ->
                                 headers => Headers,
                                 request_id => RequestId
                             },
-                            case ensure_allowed_method(Method, Context0) of
+                            case ensure_allowed_query(Context0) of
                                 ok ->
-                                    case ensure_security(Context0, Opts) of
+                                    case ensure_allowed_method(Method, Context0) of
                                         ok ->
-                                            {ok, Context0, Req0};
-                                        {error, Err3} ->
-                                            {error, with_request_id(Err3, RequestId), Req0}
+                                            case ensure_security(Context0, Opts) of
+                                                ok ->
+                                                    {ok, Context0, Req0};
+                                                {error, Err3} ->
+                                                    {error, with_request_id(Err3, RequestId), Req0}
+                                            end;
+                                        {error, Err4} ->
+                                            {error, with_request_id(Err4, RequestId), Req0}
                                     end;
-                                {error, Err4} ->
-                                    {error, with_request_id(Err4, RequestId), Req0}
+                                {error, Err5} ->
+                                    {error, with_request_id(Err5, RequestId), Req0}
                             end
                     end
             end
@@ -277,6 +282,78 @@ props_enabled(Query) ->
         _ -> true
     end.
 
+ensure_allowed_query(Context) ->
+    Op = maps:get(op, Context, undefined),
+    Query = maps:get(query, Context, #{}),
+    case allowed_query_keys(Op) of
+        all ->
+            validate_query_values(Op, Query);
+        Allowed ->
+            Unknown = [
+                Key
+                || Key <- maps:keys(Query),
+                   is_binary(Key),
+                   not lists:member(Key, Allowed)
+            ],
+            case Unknown of
+                [] ->
+                    validate_query_values(Op, Query);
+                [Key | _] ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_query">>,
+                        reason => iolist_to_binary([<<"Unsupported query parameter: ">>, Key])
+                    }}
+            end
+    end.
+
+allowed_query_keys(keys) ->
+    [<<"keys">>, <<"props">>, <<"timeout">>];
+allowed_query_keys(index_query) ->
+    [
+        <<"stream">>,
+        <<"max_results">>,
+        <<"continuation">>,
+        <<"return_terms">>,
+        <<"pagination_sort">>,
+        <<"timeout">>,
+        <<"term_regex">>
+    ];
+allowed_query_keys(_) ->
+    all.
+
+validate_query_values(keys, Query) ->
+    case maps:get(<<"keys">>, Query, undefined) of
+        undefined -> ok;
+        <<"true">> -> ok;
+        <<"false">> -> ok;
+        <<"stream">> -> ok;
+        true -> ok;
+        false -> ok;
+        _ ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => <<"keys query must be true|false|stream">>
+            }}
+    end;
+validate_query_values(index_query, Query) ->
+    case maps:get(<<"stream">>, Query, undefined) of
+        undefined -> ok;
+        <<"true">> -> ok;
+        <<"false">> -> ok;
+        true -> ok;
+        false -> ok;
+        _ ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => <<"stream query must be true|false">>
+            }}
+    end;
+validate_query_values(_, _Query) ->
+    ok.
+
 ensure_allowed_method(Method, Context) ->
     Allowed = allowed_methods(maps:get(op, Context), maps:get(alias, Context)),
     case lists:member(Method, Allowed) of
@@ -338,6 +415,8 @@ normalize_query_value(Key, Value) when
     parse_quorum(Value);
 normalize_query_value(<<"timeout">>, Value) ->
     parse_timeout(Value);
+normalize_query_value(<<"max_results">>, Value) ->
+    parse_max_results(Value);
 normalize_query_value(_, Value) ->
     {ok, Value}.
 
@@ -363,6 +442,12 @@ parse_timeout(Value) ->
     case integer_from_binary(Value) of
         {ok, Int} when Int >= 0 -> {ok, Int};
         _ -> {error, <<"Invalid timeout value">>}
+    end.
+
+parse_max_results(Value) ->
+    case integer_from_binary(Value) of
+        {ok, Int} when Int > 0 -> {ok, Int};
+        _ -> {error, <<"Invalid max_results value">>}
     end.
 
 detect_stream_mode(Query) ->

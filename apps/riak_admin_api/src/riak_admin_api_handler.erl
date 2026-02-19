@@ -63,6 +63,10 @@ dispatch(Context, Req, Opts, ReplyOpts) ->
             handle_bucket_type_props(Context, Req, Opts, ReplyOpts);
         buckets ->
             handle_bucket_listing(Context, Req, Opts, ReplyOpts);
+        keys ->
+            handle_keys(Context, Req, Opts, ReplyOpts);
+        index_query ->
+            handle_index_query(Context, Req, Opts, ReplyOpts);
         object_item ->
             handle_object_item(Context, Req, Opts, ReplyOpts);
         object_collection ->
@@ -168,6 +172,72 @@ handle_bucket_listing(Context, Req, Opts, ReplyOpts) ->
         <<"HEAD">> ->
             execute_bucket_backend(
                 list_buckets,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_keys(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(
+                list_keys,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(
+                list_keys,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_index_query(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(
+                index_query,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(
+                index_query,
                 Context,
                 base_backend_input(Context),
                 Req,
