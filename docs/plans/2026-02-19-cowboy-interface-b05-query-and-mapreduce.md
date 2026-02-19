@@ -47,18 +47,26 @@ Migrate advanced query and mapreduce HTTP paths to Cowboy while preserving paylo
 
 ```yaml
 batch: B05
-status: planned
+status: done
 branch: feature/cowboy-b05-query-mapred
-base_commit: TBD
-end_commit: TBD
+base_commit: 70b1f2f9
+end_commit: see_report_back_output
 artifacts:
   - docs/plans/artifacts/cowboy-query-mapred-parity-notes.md
 decisions:
-  - TBD
+  - Added explicit Cowboy route coverage for `/mapred`, `/buckets/:bucket/query`, and `/types/:bucket_type/buckets/:bucket/query` to keep route declaration and parser normalization in lockstep.
+  - Normalized query and mapreduce request parsing with per-operation query allowlists (`query` none, `mapred` only `chunked`) and method contracts (`query` POST-only; `mapred` GET/HEAD/POST).
+  - Implemented handler dispatch and gateway action wiring for `query` and `mapred` while preserving alias-family mapping discipline into `riak_admin_api_riak:bucket_operation/3`.
+  - Kept compatibility-first mapreduce chunked behavior using multipart envelope semantics with aggregated-body transport in this migration stage.
+  - Added explicit fallback contract when legacy mapreduce backend modules are unavailable (`501 not_implemented`) instead of silent crashes.
 open_risks:
-  - long-running query cancellation behavior
+  - MapReduce chunked responses are currently aggregated before reply, so true incremental flush/backpressure behavior remains deferred to later hardening.
+  - Timeout signaling is endpoint/backend-path dependent (`query` timeout uses object timeout mapping; mapreduce timeout remains `500 timeout`) and should be revisited in B07 parity/performance validation.
+  - Query cancellation and long-running operation interruption semantics remain dependent on underlying Riak client behavior and are not newly instrumented in B05.
 handoff_notes:
-  - B06 should retain error taxonomy used here
+  - B06 should preserve B05 alias-family normalization, route->parser->internal mapping discipline, and Cowboy error envelope taxonomy.
+  - B06 should not alter B05 query/mapreduce allowlist and method contracts unless contract evidence and parity notes are updated together.
+  - B07 should evaluate true streaming/backpressure requirements for mapreduce chunked flows and confirm timeout contract convergence targets.
 ```
 
 ## Route Matching and Parser Discipline (required)

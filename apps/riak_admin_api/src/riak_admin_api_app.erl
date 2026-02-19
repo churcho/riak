@@ -200,6 +200,9 @@ admin_routes() ->
 -spec substrate_routes() -> [cowboy_router:route_path()].
 substrate_routes() ->
     [
+        %% MapReduce compatibility endpoint (legacy singleton path)
+        {"/mapred", riak_admin_api_handler, #{route_family => mapred}},
+
         %% Legacy alias family
         {"/riak", riak_admin_api_handler, #{route_family => riak}},
         {"/riak/:bucket", riak_admin_api_handler, #{route_family => riak}},
@@ -209,6 +212,7 @@ substrate_routes() ->
         {"/buckets", riak_admin_api_handler, #{route_family => buckets}},
         {"/buckets/:bucket/props", riak_admin_api_handler, #{route_family => buckets}},
         {"/buckets/:bucket/keys", riak_admin_api_handler, #{route_family => buckets}},
+        {"/buckets/:bucket/query", riak_admin_api_handler, #{route_family => buckets}},
         {"/buckets/:bucket/index/:field/:term", riak_admin_api_handler,
             #{route_family => buckets}},
         {"/buckets/:bucket/index/:field/:start/:end", riak_admin_api_handler,
@@ -224,6 +228,8 @@ substrate_routes() ->
         {"/types/:bucket_type/buckets/:bucket/props", riak_admin_api_handler,
             #{route_family => types}},
         {"/types/:bucket_type/buckets/:bucket/keys", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/query", riak_admin_api_handler,
             #{route_family => types}},
         {"/types/:bucket_type/buckets/:bucket/index/:field/:term", riak_admin_api_handler,
             #{route_family => types}},

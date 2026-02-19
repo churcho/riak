@@ -72,6 +72,7 @@ normalize_path(Method, Path0, Query) ->
         ok ->
             Segments = path_segments(Path),
             case Segments of
+                [<<"mapred">>] -> normalize_mapred(Method, Query1);
                 [<<"riak">> | Tail] -> normalize_riak(Method, Tail, Query1);
                 [<<"buckets">> | Tail] -> normalize_buckets(Method, Tail, Query1);
                 [<<"types">>, BucketType | Tail] ->
@@ -157,6 +158,9 @@ normalize_riak(Method, Tail, Query) ->
             }}
     end.
 
+normalize_mapred(_Method, Query) ->
+    {ok, base_context(mapred, mapred, Query)}.
+
 normalize_buckets(Method, Tail, Query) ->
     case Tail of
         [] ->
@@ -174,6 +178,8 @@ normalize_buckets(Method, Tail, Query) ->
                 bucket => Bucket,
                 key => Key
             }};
+        [Bucket, <<"query">>] ->
+            {ok, (base_context(query, buckets, Query))#{bucket => Bucket}};
         [Bucket, <<"index">>, Field, Term] ->
             {ok, (base_context(index_query, buckets, Query))#{
                 bucket => Bucket,
@@ -217,6 +223,8 @@ normalize_types(Method, BucketType, Tail, Query) ->
                 bucket => Bucket,
                 key => Key
             }};
+        [<<"buckets">>, Bucket, <<"query">>] ->
+            {ok, (base_context(query, types, Query, BucketType))#{bucket => Bucket}};
         [<<"buckets">>, Bucket, <<"index">>, Field, Term] ->
             {ok, (base_context(index_query, types, Query, BucketType))#{
                 bucket => Bucket,
@@ -309,6 +317,10 @@ ensure_allowed_query(Context) ->
 
 allowed_query_keys(keys) ->
     [<<"keys">>, <<"props">>, <<"timeout">>];
+allowed_query_keys(query) ->
+    [];
+allowed_query_keys(mapred) ->
+    [<<"chunked">>];
 allowed_query_keys(index_query) ->
     [
         <<"stream">>,
@@ -351,6 +363,20 @@ validate_query_values(index_query, Query) ->
                 reason => <<"stream query must be true|false">>
             }}
     end;
+validate_query_values(mapred, Query) ->
+    case maps:get(<<"chunked">>, Query, undefined) of
+        undefined -> ok;
+        <<"true">> -> ok;
+        <<"false">> -> ok;
+        true -> ok;
+        false -> ok;
+        _ ->
+            {error, #{
+                status => 400,
+                code => <<"invalid_query">>,
+                reason => <<"chunked query must be true|false">>
+            }}
+    end;
 validate_query_values(_, _Query) ->
     ok.
 
@@ -373,6 +399,8 @@ allowed_methods(bucket_props, riak) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>];
 allowed_methods(bucket_props, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"DELETE">>];
 allowed_methods(bucket_type_props, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>];
 allowed_methods(keys, _) -> [<<"GET">>, <<"HEAD">>];
+allowed_methods(query, _) -> [<<"POST">>];
+allowed_methods(mapred, _) -> [<<"GET">>, <<"HEAD">>, <<"POST">>];
 allowed_methods(object_collection, _) -> [<<"POST">>];
 allowed_methods(object_item, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>];
 allowed_methods(index_query, _) -> [<<"GET">>, <<"HEAD">>];
@@ -401,6 +429,7 @@ normalize_query_value(Key, Value) when
     Key =:= <<"include_context">>;
     Key =:= <<"asis">>;
     Key =:= <<"stream">>;
+    Key =:= <<"chunked">>;
     Key =:= <<"return_terms">>;
     Key =:= <<"pagination_sort">> ->
     parse_boolean(Value);
@@ -638,7 +667,8 @@ validate_path_shape(_) ->
 
 alias_version(riak) -> 1;
 alias_version(buckets) -> 2;
-alias_version(types) -> 3.
+alias_version(types) -> 3;
+alias_version(mapred) -> 2.
 
 header_name(Key) when is_binary(Key) ->
     list_to_binary(string:lowercase(binary_to_list(Key)));

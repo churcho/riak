@@ -122,12 +122,14 @@ routes_include_all_active_substrate_paths_test() ->
     Routes = riak_admin_api_app:routes(),
     Paths = [Path || {Path, Handler, _Opts} <- Routes, Handler =:= riak_admin_api_handler],
     Expected = [
+        "/mapred",
         "/riak",
         "/riak/:bucket",
         "/riak/:bucket/:key",
         "/buckets",
         "/buckets/:bucket/props",
         "/buckets/:bucket/keys",
+        "/buckets/:bucket/query",
         "/buckets/:bucket/keys/:key",
         "/buckets/:bucket/index/:field/:term",
         "/buckets/:bucket/index/:field/:start/:end",
@@ -135,6 +137,7 @@ routes_include_all_active_substrate_paths_test() ->
         "/types/:bucket_type/buckets",
         "/types/:bucket_type/buckets/:bucket/props",
         "/types/:bucket_type/buckets/:bucket/keys",
+        "/types/:bucket_type/buckets/:bucket/query",
         "/types/:bucket_type/buckets/:bucket/keys/:key",
         "/types/:bucket_type/buckets/:bucket/index/:field/:term",
         "/types/:bucket_type/buckets/:bucket/index/:field/:start/:end"
@@ -151,5 +154,5 @@ substrate_routes_define_route_family_metadata_test() ->
     lists:foreach(fun({_Path, Opts}) ->
         ?assert(is_map(Opts)),
         Family = maps:get(route_family, Opts, undefined),
-        ?assert(lists:member(Family, [riak, buckets, types]))
+        ?assert(lists:member(Family, [mapred, riak, buckets, types]))
     end, SubstrateRoutes).

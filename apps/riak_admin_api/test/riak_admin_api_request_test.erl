@@ -144,6 +144,30 @@ normalize_index_range_path_test() ->
     ?assertEqual(<<"age_int">>, maps:get(field, Req)),
     ?assertEqual({<<"10">>, <<"20">>}, maps:get(range, Req)).
 
+normalize_query_alias_equivalence_test() ->
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/buckets/users/query">>, #{}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/types/maps/buckets/users/query">>, #{}),
+
+    Canonical = #{
+        op => query,
+        bucket_type => <<"maps">>,
+        bucket => <<"users">>,
+        key => undefined
+    },
+
+    ?assertEqual(Canonical#{bucket_type => <<"default">>}, pick_query_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_query_canonical(TypesReq)).
+
+normalize_mapred_path_and_stream_mode_test() ->
+    {ok, Req} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/mapred">>, #{<<"chunked">> => <<"true">>}),
+    ?assertEqual(mapred, maps:get(op, Req)),
+    ?assertEqual(mapred, maps:get(alias, Req)),
+    ?assertEqual(mapred, maps:get(stream_mode, maps:get(query, Req))),
+    ?assertEqual(<<"true">>, maps:get(<<"chunked">>, maps:get(query, Req))).
+
 normalize_unsupported_path_shapes_test_() ->
     [
         ?_assertMatch(
@@ -250,6 +274,38 @@ normalize_index_query_allowlist_rejects_unknown_test() ->
     ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
     ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
 
+normalize_query_operation_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"POST">>,
+        path => <<"/buckets/users/query">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
+
+normalize_mapred_query_allowlist_rejects_unknown_test() ->
+    Req0 = #{
+        method => <<"POST">>,
+        path => <<"/mapred">>,
+        query => #{<<"unexpected">> => <<"1">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)),
+    ?assertMatch(<<"Unsupported query parameter:", _/binary>>, maps:get(reason, Err)).
+
+normalize_mapred_query_invalid_chunked_test() ->
+    Req0 = #{
+        method => <<"POST">>,
+        path => <<"/mapred">>,
+        query => #{<<"chunked">> => <<"invalid">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, #{}),
+    ?assertEqual(400, maps:get(status, Err)),
+    ?assertEqual(<<"invalid_query">>, maps:get(code, Err)).
+
 request_id_propagates_from_header_test() ->
     {ok, Headers} = riak_admin_api_request:normalize_headers(
         #{<<"x-request-id">> => <<"req-123">>}),
@@ -299,4 +355,12 @@ pick_index_canonical(Context) ->
         field => maps:get(field, Context),
         range => maps:get(range, Context),
         extras => maps:get(extras, Context)
+    }.
+
+pick_query_canonical(Context) ->
+    #{
+        op => maps:get(op, Context),
+        bucket_type => maps:get(bucket_type, Context),
+        bucket => maps:get(bucket, Context),
+        key => maps:get(key, Context)
     }.

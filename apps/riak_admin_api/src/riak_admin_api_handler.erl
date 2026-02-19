@@ -65,8 +65,12 @@ dispatch(Context, Req, Opts, ReplyOpts) ->
             handle_bucket_listing(Context, Req, Opts, ReplyOpts);
         keys ->
             handle_keys(Context, Req, Opts, ReplyOpts);
+        query ->
+            handle_query(Context, Req, Opts, ReplyOpts);
         index_query ->
             handle_index_query(Context, Req, Opts, ReplyOpts);
+        mapred ->
+            handle_mapred(Context, Req, Opts, ReplyOpts);
         object_item ->
             handle_object_item(Context, Req, Opts, ReplyOpts);
         object_collection ->
@@ -252,6 +256,92 @@ handle_index_query(Context, Req, Opts, ReplyOpts) ->
                         reason => iolist_to_binary(
                             io_lib:format("Unsupported HTTP method: ~p", [Method])),
                         allow => [<<"GET">>, <<"HEAD">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_query(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"POST">> ->
+            with_json_body(
+                Req,
+                fun(Body, JsonBody, Req1) ->
+                    execute_bucket_backend(
+                        query,
+                        Context,
+                        (base_backend_input(Context))#{
+                            body => Body,
+                            json => JsonBody
+                        },
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"POST">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_mapred(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            reply_object(
+                Context,
+                Req,
+                #{
+                    status => 200,
+                    body => mapred_usage(),
+                    content_type => <<"text/plain; charset=utf-8">>
+                },
+                ReplyOpts);
+        <<"HEAD">> ->
+            reply_object(
+                Context,
+                Req,
+                #{
+                    status => 200,
+                    body => mapred_usage(),
+                    content_type => <<"text/plain; charset=utf-8">>
+                },
+                ReplyOpts);
+        <<"POST">> ->
+            with_json_body(
+                Req,
+                fun(Body, JsonBody, Req1) ->
+                    execute_bucket_backend(
+                        mapred,
+                        Context,
+                        (base_backend_input(Context))#{
+                            body => Body,
+                            json => JsonBody
+                        },
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>, <<"POST">>]
                     },
                     ReplyOpts),
                 Req)
@@ -447,6 +537,27 @@ with_props_body(Req, HandlerFun, ReplyOpts) ->
         end,
         ReplyOpts).
 
+with_json_body(Req, HandlerFun, ReplyOpts) ->
+    with_request_body(
+        Req,
+        fun(Body, Req1) ->
+            case decode_json_object(Body) of
+                {ok, JsonBody} ->
+                    HandlerFun(Body, JsonBody, Req1);
+                {error, Reason} ->
+                    riak_admin_api_response:reply_error_map(
+                        with_request_id(
+                            #{
+                                status => 400,
+                                code => <<"invalid_body">>,
+                                reason => Reason
+                            },
+                            ReplyOpts),
+                        Req1)
+            end
+        end,
+        ReplyOpts).
+
 decode_props_body(Body) ->
     case catch mochijson2:decode(Body) of
         {struct, Fields} ->
@@ -458,6 +569,17 @@ decode_props_body(Body) ->
             end;
         _ ->
             {error, <<"Body must be JSON: {\"props\": {...}}">>}
+    end.
+
+decode_json_object(Body) ->
+    try jsx:decode(Body, [return_maps]) of
+        Json when is_map(Json) ->
+            {ok, Json};
+        _ ->
+            {error, <<"Body must be a JSON object">>}
+    catch
+        _:_ ->
+            {error, <<"Body must be a JSON object">>}
     end.
 
 read_request_body(Req = #{body := Body}) when is_binary(Body) ->
@@ -585,3 +707,10 @@ response_opts(Context, Extra) ->
 
 request_method(#{method := Method}) when is_binary(Method) -> Method;
 request_method(Req) -> cowboy_req:method(Req).
+
+mapred_usage() ->
+    <<"This resource accepts POSTs with bodies containing JSON of the form:\n"
+      "{\n"
+      " \"inputs\":[...list of inputs...],\n"
+      " \"query\":[...list of map/reduce phases...]\n"
+      "}\n">>.

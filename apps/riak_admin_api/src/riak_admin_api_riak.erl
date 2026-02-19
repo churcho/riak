@@ -81,6 +81,33 @@
 -define(INDEX_PREFIX, <<"x-riak-index-">>).
 -define(DEFAULT_BUCKET_LIST_TIMEOUT, 5 * 60000).
 -define(DEFAULT_KEY_STREAM_TIMEOUT, 5000).
+-define(QUERY_DEFAULT_TIMEOUT_SECS, 60).
+-define(QUERY_CONTINUATION_HEADER, <<"x-riak-continuation">>).
+-define(QUERY_KEY_AGGREGATION_EXPRESSION, <<"aggregation_expression">>).
+-define(QUERY_KEY_ACCUMULATION_OPTION, <<"accumulation_option">>).
+-define(QUERY_KEY_ACCUMULATION_TERM, <<"accumulation_term">>).
+-define(QUERY_KEY_SUBSTITUTIONS, <<"substitutions">>).
+-define(QUERY_KEY_TIMEOUT, <<"timeout">>).
+-define(QUERY_KEY_MAX_RESULTS, <<"max_results">>).
+-define(QUERY_KEY_CONTINUATION, <<"continuation">>).
+-define(QUERY_KEY_QUERY_LIST, <<"query_list">>).
+-define(QUERY_KEY_QL_AGGREGATION_TAG, <<"aggregation_tag">>).
+-define(QUERY_KEY_QL_INDEX_NAME, <<"index_name">>).
+-define(QUERY_KEY_QL_START_TERM, <<"start_term">>).
+-define(QUERY_KEY_QL_END_TERM, <<"end_term">>).
+-define(QUERY_KEY_QL_REGULAR_EXPRESSION, <<"regular_expression">>).
+-define(QUERY_KEY_QL_EVALUATION_EXPRESSION, <<"evaluation_expression">>).
+-define(QUERY_KEY_QL_FILTER_EXPRESSION, <<"filter_expression">>).
+-define(QUERY_RESULT_KEYS, <<"keys">>).
+-define(QUERY_RESULT_TERMS, <<"terms">>).
+-define(QUERY_RESULT_COUNT, <<"count">>).
+-define(QUERY_RESULT_TERMCOUNT, <<"term_with_count">>).
+-define(QUERY_RESULT_RAWKEYS, <<"raw_keys">>).
+-define(QUERY_RESULT_RAWTERMS, <<"raw_terms">>).
+-define(QUERY_RESULT_RAWCOUNT, <<"raw_count">>).
+-define(QUERY_RESULT_TERMRAWCOUNT, <<"term_with_rawcount">>).
+-define(MAPRED_KEY_INPUTS, <<"inputs">>).
+-define(MAPRED_KEY_QUERY, <<"query">>).
 
 %% Types
 -export_type([dc_info/0]).
@@ -138,7 +165,9 @@ object_operation(_, _Context, _Input, _Client) ->
     set_bucket_type_props |
     list_buckets |
     list_keys |
-    index_query,
+    index_query |
+    query |
+    mapred,
     map(),
     map()) -> {ok, map()} | {error, map()}.
 bucket_operation(Action, Context, Input) ->
@@ -202,6 +231,10 @@ bucket_operation(list_keys, Context, _Input, Client) ->
     key_list_operation(Context, Client);
 bucket_operation(index_query, Context, _Input, Client) ->
     index_operation(Context, Client);
+bucket_operation(query, Context, Input, Client) ->
+    query_operation(Context, Input, Client);
+bucket_operation(mapred, Context, Input, Client) ->
+    mapred_operation(Context, Input, Client);
 bucket_operation(_, _Context, _Input, _Client) ->
     {error, #{
         status => 400,
@@ -1248,6 +1281,495 @@ normalize_boolean_query(Value, Default) ->
         false -> false;
         _ -> Default
     end.
+
+query_operation(Context, Input, Client) ->
+    Bucket = bucket_ref(Context),
+    case query_body_map(Input) of
+        {ok, QueryMap} ->
+            case validate_query_request_body(QueryMap) of
+                ok ->
+                    case make_complex_query(Bucket, QueryMap) of
+                        {ok, Query0} ->
+                            AccOpt = riak_kv_query:get_accumulator(Query0),
+                            {ok, Query} = riak_kv_query:add_result_encodingfun(
+                                Query0,
+                                query_encoding_function(AccOpt)),
+                            execute_query(Query, AccOpt, Client);
+                        {error, Stage, Reason} ->
+                            {error, query_validation_error(Stage, Reason)}
+                    end;
+                {error, Reason} ->
+                    {error, query_invalid_body_error(Reason)}
+            end;
+        {error, Reason} ->
+            {error, query_invalid_body_error(Reason)}
+    end.
+
+query_body_map(Input) ->
+    case maps:get(json, Input, undefined) of
+        Json when is_map(Json) ->
+            {ok, Json};
+        _ ->
+            decode_query_json_body(maps:get(body, Input, <<>>))
+    end.
+
+decode_query_json_body(Body) ->
+    try
+        case riak_kv_wm_json:decode(Body) of
+            JsonBody when is_map(JsonBody) ->
+                {ok, JsonBody};
+            _ ->
+                {error, <<"Body must be a JSON object">>}
+        end
+    catch
+        error:Reason ->
+            {error, iolist_to_binary(io_lib:format("Malformed json request - ~p", [Reason]))}
+    end.
+
+validate_query_request_body(QueryMap) ->
+    case check_query_keys(maps:keys(QueryMap), request) of
+        ok ->
+            QueryList = maps:get(?QUERY_KEY_QUERY_LIST, QueryMap, []),
+            check_query_list(QueryList, false);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+check_query_list([], true) ->
+    ok;
+check_query_list([], false) ->
+    {error, <<"No valid query provided">>};
+check_query_list([HeadQuery | Rest], _AtLeastOne) when is_map(HeadQuery) ->
+    case check_query_keys(maps:keys(HeadQuery), query) of
+        ok ->
+            check_query_list(Rest, true);
+        {error, Reason} ->
+            {error, Reason}
+    end;
+check_query_list(_, _AtLeastOne) ->
+    {error, <<"No valid query provided">>}.
+
+check_query_keys(Keys, request) ->
+    check_query_keys(
+        Keys,
+        [?QUERY_KEY_QUERY_LIST],
+        [
+            ?QUERY_KEY_AGGREGATION_EXPRESSION,
+            ?QUERY_KEY_ACCUMULATION_OPTION,
+            ?QUERY_KEY_ACCUMULATION_TERM,
+            ?QUERY_KEY_SUBSTITUTIONS,
+            ?QUERY_KEY_TIMEOUT,
+            ?QUERY_KEY_QUERY_LIST,
+            ?QUERY_KEY_MAX_RESULTS,
+            ?QUERY_KEY_CONTINUATION
+        ]);
+check_query_keys(Keys, query) ->
+    check_query_keys(
+        Keys,
+        [
+            ?QUERY_KEY_QL_INDEX_NAME,
+            ?QUERY_KEY_QL_START_TERM,
+            ?QUERY_KEY_QL_END_TERM
+        ],
+        [
+            ?QUERY_KEY_QL_AGGREGATION_TAG,
+            ?QUERY_KEY_QL_INDEX_NAME,
+            ?QUERY_KEY_QL_START_TERM,
+            ?QUERY_KEY_QL_END_TERM,
+            ?QUERY_KEY_QL_REGULAR_EXPRESSION,
+            ?QUERY_KEY_QL_EVALUATION_EXPRESSION,
+            ?QUERY_KEY_QL_FILTER_EXPRESSION
+        ]).
+
+check_query_keys(Keys, RequiredKeys, PossibleKeys) ->
+    RequiredKeyList = lists:filter(
+        fun(Key) -> lists:member(Key, Keys) end,
+        RequiredKeys),
+    PossibleKeyList = lists:filter(
+        fun(Key) -> lists:member(Key, PossibleKeys) end,
+        Keys),
+    case RequiredKeyList of
+        RequiredKeys ->
+            case PossibleKeyList of
+                Keys ->
+                    ok;
+                _NotAllKeys ->
+                    ExtraKeys = lists:subtract(Keys, PossibleKeyList),
+                    {error, iolist_to_binary(io_lib:format(
+                        "Unexpected keys in request ~p", [ExtraKeys]))}
+            end;
+        _NotAllRequiredKeys ->
+            MissingKeys = lists:subtract(RequiredKeys, RequiredKeyList),
+            {error, iolist_to_binary(io_lib:format(
+                "Missing required keys in request ~p", [MissingKeys]))}
+    end.
+
+make_complex_query(BucketType, QueryMap) ->
+    TimeoutDefault = application:get_env(riak_kv, query_timeout_secs, ?QUERY_DEFAULT_TIMEOUT_SECS),
+    Timeout = maps:get(?QUERY_KEY_TIMEOUT, QueryMap, TimeoutDefault),
+    case Timeout of
+        T when is_integer(T), T > 0 ->
+            QueryList = maps:get(?QUERY_KEY_QUERY_LIST, QueryMap),
+            InitQuery = case length(QueryList) of
+                1 ->
+                    riak_kv_query:new(BucketType, single_query, Timeout);
+                _ ->
+                    riak_kv_query:new(BucketType, combo_query, Timeout)
+            end,
+            case add_query_accumulation(QueryMap, InitQuery) of
+                {ok, Query1} ->
+                    case add_query_definitions(QueryMap, Query1, QueryList) of
+                        {ok, Query2} ->
+                            case maps:get(?QUERY_KEY_CONTINUATION, QueryMap, none) of
+                                none ->
+                                    {ok, Query2};
+                                Continuation ->
+                                    riak_kv_query:add_continuation(Query2, Continuation)
+                            end;
+                        Error ->
+                            Error
+                    end;
+                Error ->
+                    Error
+            end;
+        _ ->
+            {error, init, <<"Bad timeout">>}
+    end.
+
+add_query_accumulation(QueryMap, InitQuery) ->
+    AccOpt = maps:get(?QUERY_KEY_ACCUMULATION_OPTION, QueryMap, undefined),
+    AccTerm = maps:get(?QUERY_KEY_ACCUMULATION_TERM, QueryMap, undefined),
+    MaxResults = maps:get(?QUERY_KEY_MAX_RESULTS, QueryMap, undefined),
+    case riak_kv_query:add_accumulation_option(InitQuery, AccOpt) of
+        {ok, Query0} ->
+            case riak_kv_query:add_accumulation_term(Query0, AccTerm) of
+                {ok, Query1} ->
+                    case MaxResults of
+                        undefined ->
+                            {ok, Query1};
+                        Value ->
+                            riak_kv_query:add_maxresults(Query1, Value)
+                    end;
+                Error ->
+                    Error
+            end;
+        Error ->
+            Error
+    end.
+
+add_query_definitions(QueryMap, Query, QueryList) ->
+    AggExpr = maps:get(?QUERY_KEY_AGGREGATION_EXPRESSION, QueryMap, undefined),
+    case riak_kv_query:add_aggregation_expression(Query, AggExpr) of
+        {ok, Query0} ->
+            Subs = maps:get(?QUERY_KEY_SUBSTITUTIONS, QueryMap, maps:new()),
+            riak_kv_query:add_queries(Query0, lists:map(fun convert_query_map/1, QueryList), Subs);
+        Error ->
+            Error
+    end.
+
+convert_query_map(QueryMap) ->
+    {
+        maps:get(?QUERY_KEY_QL_AGGREGATION_TAG, QueryMap, undefined),
+        maps:get(?QUERY_KEY_QL_INDEX_NAME, QueryMap),
+        maps:get(?QUERY_KEY_QL_START_TERM, QueryMap),
+        maps:get(?QUERY_KEY_QL_END_TERM, QueryMap),
+        maps:get(?QUERY_KEY_QL_REGULAR_EXPRESSION, QueryMap, undefined),
+        maps:get(?QUERY_KEY_QL_EVALUATION_EXPRESSION, QueryMap, undefined),
+        maps:get(?QUERY_KEY_QL_FILTER_EXPRESSION, QueryMap, undefined)
+    }.
+
+query_encoding_function(AccOpt) ->
+    fun(Results) -> encode_query_results(AccOpt, Results) end.
+
+encode_query_results(keys, Results) ->
+    iolist_to_binary(
+        riak_kv_wm_json:encode(
+            #{?QUERY_RESULT_KEYS => Results},
+            fun encode_query_key/2));
+encode_query_results(raw_keys, Results) ->
+    iolist_to_binary(
+        riak_kv_wm_json:encode(
+            #{?QUERY_RESULT_RAWKEYS => Results},
+            fun encode_query_key/2));
+encode_query_results(terms, Results) ->
+    iolist_to_binary(
+        riak_kv_wm_json:encode(
+            #{?QUERY_RESULT_TERMS => Results},
+            fun encode_query_key_with_term/2));
+encode_query_results(raw_terms, Results) ->
+    iolist_to_binary(
+        riak_kv_wm_json:encode(
+            #{?QUERY_RESULT_RAWTERMS => Results},
+            fun encode_query_key_with_term/2));
+encode_query_results(raw_count, Count) ->
+    iolist_to_binary(riak_kv_wm_json:encode(#{?QUERY_RESULT_RAWCOUNT => Count}));
+encode_query_results(count, Count) ->
+    iolist_to_binary(riak_kv_wm_json:encode(#{?QUERY_RESULT_COUNT => Count}));
+encode_query_results(term_with_rawcount, CountMap) ->
+    iolist_to_binary(riak_kv_wm_json:encode(#{?QUERY_RESULT_TERMRAWCOUNT => CountMap}));
+encode_query_results(term_with_count, CountMap) ->
+    iolist_to_binary(riak_kv_wm_json:encode(#{?QUERY_RESULT_TERMCOUNT => CountMap})).
+
+encode_query_key({{_Term, Key}}, Encode) when is_binary(Key) ->
+    encode_query_key(Key, Encode);
+encode_query_key({Key}, Encode) when is_binary(Key) ->
+    encode_query_key(Key, Encode);
+encode_query_key(Key, Encode) ->
+    riak_kv_wm_json:encode_value(Key, Encode).
+
+encode_query_key_with_term({TermKeyTuple}, Encode) when is_tuple(TermKeyTuple) ->
+    encode_query_key_with_term(TermKeyTuple, Encode);
+encode_query_key_with_term({Term, Key}, Encode) when is_binary(Term), is_binary(Key) ->
+    [123, [Encode(Term, Encode), $: | Encode(Key, Encode)], 125];
+encode_query_key_with_term(Result, Encode) ->
+    riak_kv_wm_json:encode_value(Result, Encode).
+
+execute_query(Query, AccOpt, Client) ->
+    case riak_client:query(Query, Client) of
+        {error, timeout} ->
+            {error, object_error_map(timeout)};
+        {error, Reason} ->
+            {error, #{
+                status => 500,
+                code => <<"backend_error">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Query with option ~w failed - ~p", [AccOpt, Reason]))
+            }};
+        {JsonEncodedResults, none} when is_binary(JsonEncodedResults) ->
+            {ok, json_backend_reply(200, JsonEncodedResults)};
+        {JsonEncodedResults, {{LastTerm, LastKey}}}
+                when
+                    is_binary(JsonEncodedResults),
+                    is_binary(LastTerm),
+                    is_binary(LastKey) ->
+            Continuation = riak_kv_query:make_continuation(LastTerm, LastKey),
+            {ok, (json_backend_reply(200, JsonEncodedResults))#{
+                headers => #{?QUERY_CONTINUATION_HEADER => to_bin(Continuation)}
+            }};
+        Other ->
+            {error, #{
+                status => 500,
+                code => <<"backend_error">>,
+                reason => iolist_to_binary(io_lib:format("Unexpected query reply: ~p", [Other]))
+            }}
+    end.
+
+query_invalid_body_error(Reason) ->
+    #{
+        status => 400,
+        code => <<"invalid_body">>,
+        reason => to_bin(Reason)
+    }.
+
+query_validation_error(Stage, Reason) ->
+    #{
+        status => 400,
+        code => <<"invalid_query">>,
+        reason => iolist_to_binary(io_lib:format(
+            "Validation failure at stage ~p due to ~ts",
+            [Stage, to_bin(Reason)]))
+    }.
+
+mapred_operation(_Context, Input, _Client) ->
+    case mapred_body_map(Input) of
+        {ok, BodyMap} ->
+            case validate_mapred_body(BodyMap) of
+                ok ->
+                    case mapred_backend_available() of
+                        true ->
+                            mapred_operation_legacy(Input);
+                        false ->
+                            {error, mapred_unavailable_error()}
+                    end;
+                {error, Reason} ->
+                    {error, mapred_invalid_body_error(Reason)}
+            end;
+        {error, Reason} ->
+            {error, mapred_invalid_body_error(Reason)}
+    end.
+
+mapred_body_map(Input) ->
+    case maps:get(json, Input, undefined) of
+        Json when is_map(Json) ->
+            {ok, Json};
+        _ ->
+            decode_query_json_body(maps:get(body, Input, <<>>))
+    end.
+
+validate_mapred_body(BodyMap) ->
+    Inputs = maps:get(?MAPRED_KEY_INPUTS, BodyMap, undefined),
+    Query = maps:get(?MAPRED_KEY_QUERY, BodyMap, undefined),
+    case {Inputs, Query} of
+        {undefined, _} ->
+            {error, <<"The POST body was missing the \"inputs\" or \"query\" field.">>};
+        {_, undefined} ->
+            {error, <<"The POST body was missing the \"inputs\" or \"query\" field.">>};
+        {_Inputs, QueryPhases} when not is_list(QueryPhases) ->
+            {error, <<"The value of the \"query\" field was not a list">>};
+        _ ->
+            ok
+    end.
+
+mapred_backend_available() ->
+    code:which(riak_kv_mapred_json) =/= non_existing andalso
+    code:which(riak_kv_mrc_pipe) =/= non_existing.
+
+mapred_unavailable_error() ->
+    #{
+        status => 501,
+        code => <<"not_implemented">>,
+        reason => <<"MapReduce backend unavailable in this build">>
+    }.
+
+mapred_invalid_body_error(Reason) ->
+    #{
+        status => 400,
+        code => <<"invalid_body">>,
+        reason => to_bin(Reason)
+    }.
+
+mapred_operation_legacy(Input) ->
+    Body = maps:get(body, Input, <<>>),
+    QueryParams = maps:get(query, Input, #{}),
+    Chunked = maps:get(<<"chunked">>, QueryParams, false),
+    case riak_kv_mapred_json:parse_request(Body) of
+        {ok, ParsedInputs, ParsedQuery, Timeout} ->
+            case riak_kv_mrc_pipe:mapred_stream_sink(ParsedInputs, ParsedQuery, Timeout) of
+                {ok, Mrc} ->
+                    case Chunked of
+                        true ->
+                            mapred_collect_chunked_reply(Mrc, ParsedQuery);
+                        _ ->
+                            mapred_collect_nonchunked_reply(Mrc, ParsedQuery)
+                    end;
+                {error, {Fitting, Reason}} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_query">>,
+                        reason => iolist_to_binary(io_lib:format(
+                            "MapReduce phase ~p error: ~ts", [Fitting, to_bin(Reason)]))
+                    }}
+            end;
+        {error, Reason} ->
+            {error, mapred_parse_error(Reason)}
+    end.
+
+mapred_collect_nonchunked_reply(Mrc, ParsedQuery) ->
+    case riak_kv_mrc_pipe:collect_sink(Mrc) of
+        {ok, Results} ->
+            HasMRQuery = ParsedQuery =/= [],
+            JsonResults = mapred_jsonify_results(Results),
+            JsonResults1 = riak_kv_mapred_json:jsonify_bkeys(JsonResults, HasMRQuery),
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            {ok, json_backend_reply(200, mochijson2:encode(JsonResults1))};
+        {error, {sender_died, Error}} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            {error, mapred_backend_error(Error)};
+        {error, {sink_died, Error}} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            {error, mapred_backend_error(Error)};
+        {error, timeout} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            {error, #{status => 500, code => <<"timeout">>, reason => <<"timeout">>}};
+        {error, {From, Info}} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
+            {error, mapred_backend_error(Json)}
+    end.
+
+mapred_collect_chunked_reply(Mrc, ParsedQuery) ->
+    Boundary = riak_core_util:unique_id_62(),
+    HasMRQuery = ParsedQuery =/= [],
+    case mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, []) of
+        {ok, Body} ->
+            {ok, #{
+                status => 200,
+                body => Body,
+                content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+            }};
+        {error, ErrorMap} ->
+            {error, ErrorMap}
+    end.
+
+mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc) ->
+    case riak_kv_mrc_pipe:receive_sink(Mrc) of
+        {ok, Done, Outputs} ->
+            Parts = [mapred_result_part(Output, HasMRQuery, Boundary) || Output <- Outputs],
+            Acc1 = [Acc, Parts],
+            case Done of
+                true ->
+                    riak_kv_mrc_pipe:cleanup_sink(Mrc),
+                    {ok, iolist_to_binary([Acc1, <<"\r\n--", Boundary/binary, "--\r\n">>])};
+                false ->
+                    mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc1)
+            end;
+        {error, timeout, _} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            {error, #{status => 500, code => <<"timeout">>, reason => <<"timeout">>}};
+        {error, {sender_died, Error}, _} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            {error, mapred_backend_error(Error)};
+        {error, {sink_died, Error}, _} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            {error, mapred_backend_error(Error)};
+        {error, {From, Info}, _} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
+            {error, mapred_backend_error(Json)}
+    end.
+
+mapred_jsonify_results(Results) ->
+    case Results of
+        [First | _] when is_list(First) ->
+            [[riak_kv_mapred_json:jsonify_not_found(PhaseResult)
+              || PhaseResult <- PhaseResults]
+             || PhaseResults <- Results];
+        _ ->
+            [riak_kv_mapred_json:jsonify_not_found(Result) || Result <- Results]
+    end.
+
+mapred_result_part({PhaseId, Results}, HasMRQuery, Boundary) ->
+    Data = riak_kv_mapred_json:jsonify_bkeys(
+        [riak_kv_mapred_json:jsonify_not_found(Result) || Result <- Results],
+        HasMRQuery),
+    Json = mochijson2:encode({struct, [{phase, PhaseId}, {data, Data}]}),
+    [
+        "\r\n--", Boundary, "\r\n",
+        "Content-Type: application/json\r\n\r\n",
+        Json
+    ];
+mapred_result_part(Other, _HasMRQuery, Boundary) ->
+    Json = mochijson2:encode({struct, [{data, Other}]}),
+    [
+        "\r\n--", Boundary, "\r\n",
+        "Content-Type: application/json\r\n\r\n",
+        Json
+    ].
+
+mapred_parse_error({'query', Reason}) ->
+    mapred_invalid_body_error(iolist_to_binary(
+        ["An error occurred parsing the \"query\" field.\n", io_lib:format("~p", [Reason])]));
+mapred_parse_error({inputs, Reason}) ->
+    mapred_invalid_body_error(iolist_to_binary(
+        ["An error occurred parsing the \"inputs\" field.\n", io_lib:format("~p", [Reason])]));
+mapred_parse_error(missing_field) ->
+    mapred_invalid_body_error(<<"The POST body was missing the \"inputs\" or \"query\" field.">>);
+mapred_parse_error({invalid_json, Message}) ->
+    mapred_invalid_body_error(iolist_to_binary(
+        io_lib:format(
+            "The POST body was not valid JSON. The error from the parser was: ~p",
+            [Message])));
+mapred_parse_error(not_json) ->
+    mapred_invalid_body_error(<<"The POST body was not a JSON object.">>);
+mapred_parse_error(Reason) ->
+    mapred_invalid_body_error(io_lib:format("~p", [Reason])).
+
+mapred_backend_error(Reason) ->
+    #{
+        status => 500,
+        code => <<"backend_error">>,
+        reason => to_bin(Reason)
+    }.
 
 %%% ============================================================
 %%% Cluster Status
