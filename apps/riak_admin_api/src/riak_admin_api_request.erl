@@ -317,6 +317,7 @@ normalize_query_value(Key, Value) when
     Key =:= <<"returnbody">>;
     Key =:= <<"returnvalue">>;
     Key =:= <<"include_context">>;
+    Key =:= <<"asis">>;
     Key =:= <<"stream">>;
     Key =:= <<"return_terms">>;
     Key =:= <<"pagination_sort">> ->

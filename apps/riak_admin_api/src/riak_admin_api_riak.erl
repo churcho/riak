@@ -44,6 +44,7 @@
     node_stats/1,
     handoff_status/0,
     aae_status/0,
+    object_operation/3,
     %% syn-powered DC discovery
     list_dcs/0,
     remote_dcs/0,
@@ -65,9 +66,17 @@
     format_transfers/1,
     format_exchanges/1,
     node_host/1,
-    dedup_by_dc/1
+    dedup_by_dc/1,
+    object_error_map/1,
+    build_object_options/3,
+    build_location/2
 ]).
 -endif.
+
+-include_lib("riak_kv/src/riak_kv_wm_raw.hrl").
+
+-define(USERMETA_PREFIX, <<"x-riak-meta-">>).
+-define(INDEX_PREFIX, <<"x-riak-index-">>).
 
 %% Types
 -export_type([dc_info/0]).
@@ -84,6 +93,642 @@
     reachable := boolean(),    %% Always true (syn members are reachable by definition)
     started_at := non_neg_integer() %% Coordinator start time (for diagnostics)
 }.
+
+%%% ============================================================
+%%% Object CRUD Gateway (B02)
+%%% ============================================================
+
+-spec object_operation(get | put | post | delete | create, map(), map()) ->
+    {ok, map()} | {error, map()}.
+object_operation(Action, Context, Input) ->
+    case ensure_bucket_type(Context) of
+        ok ->
+            with_object_client(
+                fun(Client) -> object_operation(Action, Context, Input, Client) end);
+        {error, Error} ->
+            {error, Error}
+    end.
+
+object_operation(get, Context, Input, Client) ->
+    object_get(Context, Input, Client);
+object_operation(put, Context, Input, Client) ->
+    object_store(put, Context, Input, Client);
+object_operation(post, Context, Input, Client) ->
+    object_store(post, Context, Input, Client);
+object_operation(create, Context, Input, Client) ->
+    object_store(create, Context, Input, Client);
+object_operation(delete, Context, Input, Client) ->
+    object_delete(Context, Input, Client);
+object_operation(_, _Context, _Input, _Client) ->
+    {error, #{
+        status => 400,
+        code => <<"invalid_operation">>,
+        reason => <<"Unsupported object operation">>
+    }}.
+
+object_get(Context, Input, Client) ->
+    BucketRef = bucket_ref(Context),
+    Key = maps:get(key, Context, undefined),
+    Query = maps:get(query, Context, #{}),
+    Options = build_object_options(read, Query, [deletedvclock, {return_body, true}]),
+    case riak_client:get(BucketRef, Key, Options, Client) of
+        {ok, Obj} ->
+            object_read_reply(Context, Input, Obj);
+        {error, Reason} ->
+            {error, object_error_map(Reason)}
+    end.
+
+object_store(Mode, Context0, Input, Client) ->
+    Context = case Mode of
+        create ->
+            Generated = list_to_binary(riak_core_util:unique_id_62()),
+            Context0#{key => Generated};
+        _ ->
+            Context0
+    end,
+    case build_store_doc(Context, Input) of
+        {error, Error} ->
+            {error, Error};
+        {ok, Doc, ReturnBody, CondOpts} ->
+            Query = maps:get(query, Context, #{}),
+            BaseOptions = build_object_options(write, Query, []),
+            Options0 = BaseOptions ++ CondOpts,
+            Options = case ReturnBody of
+                true -> [returnbody | Options0];
+                false -> Options0
+            end,
+            case riak_client:put(Doc, Options, Client) of
+                ok ->
+                    {ok, write_no_body_reply(Mode, Context)};
+                {ok, Obj} ->
+                    {ok, write_return_body_reply(Mode, Context, Input, Obj)};
+                {error, Reason} ->
+                    {error, object_error_map(Reason)}
+            end
+    end.
+
+object_delete(Context, Input, Client) ->
+    BucketRef = bucket_ref(Context),
+    Key = maps:get(key, Context, undefined),
+    Query = maps:get(query, Context, #{}),
+    Headers = maps:get(headers, Input, #{}),
+    Options = build_object_options(delete, Query, []),
+    Result = case maps:get(<<"x-riak-vclock">>, Headers, undefined) of
+        undefined ->
+            riak_client:delete(BucketRef, Key, Options, Client);
+        VClockB64 ->
+            case decode_vclock(VClockB64) of
+                {ok, VClock} ->
+                    riak_client:delete_vclock(BucketRef, Key, VClock, Options, Client);
+                {error, _} ->
+                    {error, invalid_vclock}
+            end
+    end,
+    case Result of
+        ok ->
+            {ok, #{status => 204, body => <<>>}};
+        {error, Reason} ->
+            {error, object_error_map(Reason)}
+    end.
+
+object_read_reply(Context, Input, Obj) ->
+    Query = maps:get(query, Context, #{}),
+    RequestedVtag = maps:get(<<"vtag">>, Query, undefined),
+    case select_doc(Obj, RequestedVtag) of
+        {ok, {Metadata, Value}} ->
+            {ok, #{
+                status => 200,
+                body => encode_doc_value(Value),
+                content_type => format_content_type(Metadata, Value),
+                headers => response_headers_from_metadata(Metadata),
+                reply_opts => response_reply_opts(Context, Obj, Metadata)
+            }};
+        {siblings, Contents} ->
+            {Body, ContentType} = sibling_body(Contents, Input),
+            {ok, #{
+                status => 300,
+                body => Body,
+                content_type => ContentType,
+                reply_opts => #{vclock => encode_object_vclock(Obj)}
+            }};
+        notfound ->
+            {error, #{
+                status => 404,
+                code => <<"not_found">>,
+                reason => <<"not found">>
+            }}
+    end.
+
+write_no_body_reply(create, Context) ->
+    #{
+        status => 201,
+        body => <<>>,
+        headers => #{<<"location">> => build_location(Context, maps:get(key, Context))}
+    };
+write_no_body_reply(_Mode, _Context) ->
+    #{status => 204, body => <<>>}.
+
+write_return_body_reply(Mode, Context, Input, Obj) ->
+    {ok, Reply0} = object_read_reply(Context, Input, Obj),
+    case Mode of
+        create ->
+            Headers = maps:get(headers, Reply0, #{}),
+            Reply0#{
+                status => 200,
+                headers => Headers#{<<"location">> => build_location(Context, maps:get(key, Context))}
+            };
+        _ ->
+            Reply0#{status => 200}
+    end.
+
+build_store_doc(Context, Input) ->
+    Headers = maps:get(headers, Input, #{}),
+    Query = maps:get(query, Context, #{}),
+    Body = maps:get(body, Input, <<>>),
+    case parse_content_type(maps:get(<<"content-type">>, Headers, undefined)) of
+        {error, Error} ->
+            {error, Error};
+        {ok, ContentType, Charset} ->
+            BucketRef = bucket_ref(Context),
+            Key = maps:get(key, Context, undefined),
+            Doc0 = riak_object:new(BucketRef, Key, <<>>),
+            case maybe_set_vclock(Doc0, Headers) of
+                {error, Error1} ->
+                    {error, Error1};
+                {ok, Doc1} ->
+                    Metadata0 = riak_object:metadata_new(),
+                    Metadata1 = riak_object:metadata_store(?MD_CTYPE, ContentType, Metadata0),
+                    Metadata2 = maybe_store_charset(Charset, Metadata1),
+                    Metadata3 = maybe_store_header_meta(<<"content-encoding">>, ?MD_ENCODING,
+                        Headers, Metadata2),
+                    Metadata4 = maybe_store_metadata_list(?MD_USERMETA,
+                        extract_prefixed_headers(?USERMETA_PREFIX, Headers), Metadata3),
+                    Metadata5 = maybe_store_metadata_list(?MD_INDEX,
+                        extract_index_headers(Headers), Metadata4),
+                    Doc2 = riak_object:update_metadata(Doc1, Metadata5),
+                    Value = accept_doc_value(ContentType, Body),
+                    Doc = riak_object:update_value(Doc2, Value),
+                    ReturnBody = query_truthy(<<"returnbody">>, Query),
+                    case conditional_put_options(Headers) of
+                        {ok, CondOpts} -> {ok, Doc, ReturnBody, CondOpts};
+                        {error, Error2} -> {error, Error2}
+                    end
+            end
+    end.
+
+conditional_put_options(Headers) ->
+    Cond0 = case maps:is_key(<<"if-none-match">>, Headers) of
+        true -> [{if_none_match, true}];
+        false -> []
+    end,
+    case maps:get(<<"x-riak-if-not-modified">>, Headers, undefined) of
+        undefined ->
+            {ok, Cond0};
+        VClockB64 ->
+            case decode_vclock(VClockB64) of
+                {ok, VClock} -> {ok, [{if_not_modified, VClock} | Cond0]};
+                {error, _} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_vclock">>,
+                        reason => <<"Invalid X-Riak-If-Not-Modified header">>
+                    }}
+            end
+    end.
+
+maybe_set_vclock(Doc, Headers) ->
+    case maps:get(<<"x-riak-vclock">>, Headers, undefined) of
+        undefined ->
+            {ok, Doc};
+        VClockB64 ->
+            case decode_vclock(VClockB64) of
+                {ok, VClock} ->
+                    {ok, riak_object:set_vclock(Doc, VClock)};
+                {error, _} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_vclock">>,
+                        reason => <<"Invalid X-Riak-Vclock header">>
+                    }}
+            end
+    end.
+
+parse_content_type(undefined) ->
+    {error, #{
+        status => 400,
+        code => <<"missing_content_type">>,
+        reason => <<"Missing Content-Type request header">>
+    }};
+parse_content_type(<<>>) ->
+    {error, #{
+        status => 400,
+        code => <<"missing_content_type">>,
+        reason => <<"Missing Content-Type request header">>
+    }};
+parse_content_type(ContentType) when is_binary(ContentType) ->
+    [Media | Params] = binary:split(ContentType, <<";">>, [global]),
+    Charset = parse_charset(Params),
+    {ok, trim_binary(Media), Charset}.
+
+parse_charset([]) ->
+    undefined;
+parse_charset([Param | Rest]) ->
+    P = trim_binary(Param),
+    case binary:split(P, <<"=">>) of
+        [<<"charset">>, Value] -> trim_binary(Value);
+        _ -> parse_charset(Rest)
+    end.
+
+trim_binary(Bin) when is_binary(Bin) ->
+    list_to_binary(string:trim(binary_to_list(Bin))).
+
+accept_doc_value(<<"application/x-erlang-binary">>, Body) ->
+    try binary_to_term(Body)
+    catch
+        _:_ -> Body
+    end;
+accept_doc_value(_ContentType, Body) ->
+    Body.
+
+encode_doc_value(Value) when is_binary(Value) -> Value;
+encode_doc_value(Value) -> term_to_binary(Value).
+
+format_content_type(Metadata, Value) ->
+    CType = case riak_object:metadata_find(?MD_CTYPE, Metadata) of
+        {ok, Stored} -> to_bin(Stored);
+        error when is_binary(Value) -> <<"application/octet-stream">>;
+        error -> <<"application/x-erlang-binary">>
+    end,
+    case riak_object:metadata_find(?MD_CHARSET, Metadata) of
+        {ok, Charset} -> <<CType/binary, "; charset=", (to_bin(Charset))/binary>>;
+        error -> CType
+    end.
+
+response_reply_opts(Context, Obj, Metadata) ->
+    Reply0 = #{
+        vclock => encode_object_vclock(Obj),
+        etag => to_bin(riak_object:metadata_fetch(?MD_VTAG, Metadata)),
+        last_modified => metadata_last_modified(Metadata)
+    },
+    case link_header(Context, Metadata) of
+        undefined -> Reply0;
+        Link -> Reply0#{link => Link}
+    end.
+
+response_headers_from_metadata(Metadata) ->
+    Headers0 = maybe_put_header(<<"content-encoding">>,
+        riak_object:metadata_find(?MD_ENCODING, Metadata), #{}),
+    Headers1 = lists:foldl(
+        fun({MetaKey, MetaValue}, Acc) ->
+            Header = <<?USERMETA_PREFIX/binary, (to_bin(MetaKey))/binary>>,
+            Acc#{Header => to_bin(MetaValue)}
+        end,
+        Headers0,
+        metadata_list(?MD_USERMETA, Metadata)),
+    lists:foldl(
+        fun({IndexKey, IndexValue}, Acc) ->
+            Header = <<?INDEX_PREFIX/binary, (to_bin(IndexKey))/binary>>,
+            Acc#{Header => to_bin(IndexValue)}
+        end,
+        Headers1,
+        metadata_list(?MD_INDEX, Metadata)).
+
+maybe_put_header(_Header, error, Headers) ->
+    Headers;
+maybe_put_header(Header, {ok, Value}, Headers) ->
+    Headers#{Header => to_bin(Value)}.
+
+metadata_list(Key, Metadata) ->
+    case riak_object:metadata_find(Key, Metadata) of
+        {ok, List} when is_list(List) -> List;
+        _ -> []
+    end.
+
+link_header(Context, Metadata) ->
+    Bucket = maps:get(bucket, Context, undefined),
+    case Bucket of
+        undefined ->
+            undefined;
+        _ ->
+            Links = metadata_list(?MD_LINKS, Metadata),
+            UpLink = build_up_link(Context),
+            Extra = [build_rel_link(Context, Link) || Link <- Links],
+            Joined = join_links([UpLink | [L || L <- Extra, L =/= <<>>]]),
+            case Joined of
+                <<>> -> undefined;
+                _ -> Joined
+            end
+    end.
+
+build_up_link(Context) ->
+    Bucket = maps:get(bucket, Context, <<>>),
+    case maps:get(alias, Context, buckets) of
+        riak -> <<"</riak/", Bucket/binary, ">; rel=\"up\"">>;
+        buckets -> <<"</buckets/", Bucket/binary, ">; rel=\"up\"">>;
+        types ->
+            Type = maps:get(bucket_type, Context, <<"default">>),
+            <<"</types/", Type/binary, "/buckets/", Bucket/binary, ">; rel=\"up\"">>
+    end.
+
+build_rel_link(Context, {{LinkBucket, LinkKey}, Tag}) ->
+    Uri = link_object_uri(Context, to_bin(LinkBucket), to_bin(LinkKey)),
+    <<"<", Uri/binary, ">; riaktag=\"", (to_bin(Tag))/binary, "\"">>;
+build_rel_link(_Context, _Other) ->
+    <<>>.
+
+link_object_uri(Context, Bucket, Key) ->
+    case maps:get(alias, Context, buckets) of
+        riak -> <<"/riak/", Bucket/binary, "/", Key/binary>>;
+        buckets -> <<"/buckets/", Bucket/binary, "/keys/", Key/binary>>;
+        types ->
+            Type = maps:get(bucket_type, Context, <<"default">>),
+            <<"/types/", Type/binary, "/buckets/", Bucket/binary, "/keys/", Key/binary>>
+    end.
+
+join_links([]) ->
+    <<>>;
+join_links([One]) ->
+    One;
+join_links([First | Rest]) ->
+    lists:foldl(fun(Link, Acc) -> <<Acc/binary, ", ", Link/binary>> end, First, Rest).
+
+sibling_body(Contents, Input) ->
+    Accept = maps:get(<<"accept">>, maps:get(headers, Input, #{}), <<>>),
+    case binary:match(Accept, <<"multipart/mixed">>) of
+        nomatch -> sibling_text_body(Contents);
+        _ -> sibling_multipart_body(Contents)
+    end.
+
+sibling_text_body(Contents) ->
+    Vtags = [to_bin(riak_object:metadata_fetch(?MD_VTAG, MD)) || {MD, _} <- Contents],
+    Lines = [<<V/binary, "\n">> || V <- Vtags],
+    {iolist_to_binary([<<"Siblings:\n">> | Lines]), <<"text/plain">>}.
+
+sibling_multipart_body(Contents) ->
+    Boundary = <<"riak-siblings-", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    Parts = [
+        [<<"--", Boundary/binary, "\r\n">>,
+         <<"Content-Type: ", (format_content_type(MD, Value))/binary, "\r\n">>,
+         <<"ETag: ", (to_bin(riak_object:metadata_fetch(?MD_VTAG, MD)))/binary, "\r\n\r\n">>,
+         encode_doc_value(Value),
+         <<"\r\n">>]
+        || {MD, Value} <- Contents
+    ],
+    {iolist_to_binary([Parts, <<"--", Boundary/binary, "--\r\n">>]),
+     <<"multipart/mixed; boundary=", Boundary/binary>>}.
+
+select_doc(Obj, undefined) ->
+    case riak_object:get_update_value(Obj) of
+        undefined ->
+            case riak_object:get_contents(Obj) of
+                [Single] -> {ok, Single};
+                Multi when is_list(Multi) -> {siblings, Multi}
+            end;
+        UpdateValue ->
+            {ok, {riak_object:get_update_metadata(Obj), UpdateValue}}
+    end;
+select_doc(Obj, RequestedVtag) ->
+    Contents = riak_object:get_contents(Obj),
+    case lists:dropwhile(
+        fun({Metadata, _}) ->
+            to_bin(riak_object:metadata_fetch(?MD_VTAG, Metadata)) =/= RequestedVtag
+        end,
+        Contents) of
+        [Match | _] -> {ok, Match};
+        [] -> notfound
+    end.
+
+metadata_last_modified(Metadata) ->
+    LastModified = riak_object:metadata_fetch(?MD_LASTMOD, Metadata),
+    to_bin(
+        case LastModified of
+            Now = {_, _, _} ->
+                httpd_util:rfc1123_date(calendar:now_to_local_time(Now));
+            RFC1123 when is_list(RFC1123) ->
+                RFC1123;
+            Value ->
+                Value
+        end).
+
+encode_object_vclock(Obj) ->
+    encode_vclock(riak_object:vclock(Obj)).
+
+decode_vclock(VClockB64) when is_binary(VClockB64) ->
+    try
+        {ok, riak_object:decode_vclock(base64:decode(VClockB64))}
+    catch
+        _:_ -> {error, invalid_vclock}
+    end;
+decode_vclock(_) ->
+    {error, invalid_vclock}.
+
+encode_vclock(VClock) ->
+    base64:encode(riak_object:encode_vclock(VClock)).
+
+extract_prefixed_headers(Prefix, Headers) ->
+    maps:fold(
+        fun(Key, Value, Acc) ->
+            case maybe_strip_prefix(Prefix, Key) of
+                {ok, Stripped} -> [{Stripped, Value} | Acc];
+                no_match -> Acc
+            end
+        end,
+        [],
+        Headers).
+
+extract_index_headers(Headers) ->
+    Raw = extract_prefixed_headers(?INDEX_PREFIX, Headers),
+    lists:flatten([
+        [
+            {Field, trim_binary(Item)}
+            || Item <- binary:split(to_bin(Value), <<",">>, [global])
+        ]
+        || {Field, Value} <- Raw
+    ]).
+
+maybe_strip_prefix(Prefix, Value) when is_binary(Value) ->
+    PrefixSize = byte_size(Prefix),
+    case Value of
+        <<Prefix:PrefixSize/binary, Rest/binary>> -> {ok, Rest};
+        _ -> no_match
+    end;
+maybe_strip_prefix(_Prefix, _Value) ->
+    no_match.
+
+maybe_store_charset(undefined, Metadata) ->
+    Metadata;
+maybe_store_charset(Charset, Metadata) ->
+    riak_object:metadata_store(?MD_CHARSET, Charset, Metadata).
+
+maybe_store_header_meta(HeaderKey, MetaKey, Headers, Metadata) ->
+    case maps:get(HeaderKey, Headers, undefined) of
+        undefined -> Metadata;
+        Value -> riak_object:metadata_store(MetaKey, Value, Metadata)
+    end.
+
+maybe_store_metadata_list(_MetaKey, [], Metadata) ->
+    Metadata;
+maybe_store_metadata_list(MetaKey, Values, Metadata) ->
+    riak_object:metadata_store(MetaKey, Values, Metadata).
+
+-spec build_object_options(read | write | delete, map(), list()) -> list().
+build_object_options(_Mode, Query, Base) ->
+    Options0 = [
+        {r, maps:get(<<"r">>, Query, undefined)},
+        {pr, maps:get(<<"pr">>, Query, undefined)},
+        {w, maps:get(<<"w">>, Query, undefined)},
+        {pw, maps:get(<<"pw">>, Query, undefined)},
+        {dw, maps:get(<<"dw">>, Query, undefined)},
+        {rw, maps:get(<<"rw">>, Query, undefined)},
+        {node_confirms, maps:get(<<"node_confirms">>, Query, undefined)},
+        {timeout, maps:get(<<"timeout">>, Query, undefined)},
+        {basic_quorum, maps:get(<<"basic_quorum">>, Query, undefined)},
+        {notfound_ok, maps:get(<<"notfound_ok">>, Query, undefined)}
+    ],
+    Options1 = [
+        {Key, Value}
+        || {Key, Value} <- Options0,
+           Value =/= undefined
+    ],
+    Options2 = case maps:get(<<"asis">>, Query, undefined) of
+        undefined -> Options1;
+        AsisValue -> [{asis, normalize_boolean(AsisValue)} | Options1]
+    end,
+    case maps:get(<<"sync_on_write">>, Query, undefined) of
+        undefined -> Base ++ Options2;
+        SyncValue -> Base ++ [{sync_on_write, normalize_sync_on_write(SyncValue)} | Options2]
+    end.
+
+normalize_boolean(true) -> true;
+normalize_boolean(false) -> false;
+normalize_boolean(<<"true">>) -> true;
+normalize_boolean(<<"false">>) -> false;
+normalize_boolean(<<"default">>) -> default;
+normalize_boolean(default) -> default;
+normalize_boolean(Value) -> Value.
+
+normalize_sync_on_write(Value) when is_atom(Value) -> Value;
+normalize_sync_on_write(Value) when is_binary(Value) ->
+    case list_to_binary(string:lowercase(binary_to_list(Value))) of
+        <<"backend">> -> backend;
+        <<"one">> -> one;
+        <<"all">> -> all;
+        <<"default">> -> default;
+        _ -> default
+    end;
+normalize_sync_on_write(Value) -> Value.
+
+query_truthy(Key, Query) ->
+    case maps:get(Key, Query, false) of
+        true -> true;
+        <<"true">> -> true;
+        _ -> false
+    end.
+
+bucket_ref(Context) ->
+    maybe_bucket_type_ref(maps:get(bucket_type, Context, <<"default">>),
+        maps:get(bucket, Context, undefined)).
+
+maybe_bucket_type_ref(undefined, Bucket) -> Bucket;
+maybe_bucket_type_ref(<<"default">>, Bucket) -> Bucket;
+maybe_bucket_type_ref(Type, Bucket) -> {Type, Bucket}.
+
+build_location(Context, Key) ->
+    Bucket = maps:get(bucket, Context, <<>>),
+    case maps:get(alias, Context, buckets) of
+        riak -> <<"/riak/", Bucket/binary, "/", Key/binary>>;
+        buckets -> <<"/buckets/", Bucket/binary, "/keys/", Key/binary>>;
+        types ->
+            Type = maps:get(bucket_type, Context, <<"default">>),
+            <<"/types/", Type/binary, "/buckets/", Bucket/binary, "/keys/", Key/binary>>
+    end.
+
+ensure_bucket_type(Context) ->
+    Type = maps:get(bucket_type, Context, <<"default">>),
+    case Type of
+        <<"default">> ->
+            ok;
+        _ ->
+            case riak_core_bucket_type:get(Type) of
+                undefined ->
+                    {error, #{
+                        status => 404,
+                        code => <<"bucket_type_unknown">>,
+                        reason => <<"Unknown bucket type">>
+                    }};
+                _ ->
+                    ok
+            end
+    end.
+
+with_object_client(Fun) ->
+    case riak_kv_wm_utils:get_riak_client(local, undefined) of
+        {ok, Client} ->
+            try Fun(Client)
+            catch
+                Class:Reason:Stack ->
+                    logger:error(
+                        "[riak_admin] object operation failed: ~p:~p~n~p",
+                        [Class, Reason, Stack]),
+                    {error, object_error_map({Class, Reason})}
+            end;
+        {error, Reason} ->
+            {error, object_error_map({client_error, Reason})}
+    end.
+
+-spec object_error_map(term()) -> map().
+object_error_map(precommit_fail) ->
+    #{status => 403, code => <<"forbidden">>, reason => <<"pre-commit hook failed">>};
+object_error_map({precommit_fail, Message}) ->
+    #{status => 403, code => <<"forbidden">>, reason => to_bin(Message)};
+object_error_map(too_many_fails) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => <<"Too many write failures to satisfy W/DW">>};
+object_error_map(timeout) ->
+    #{status => 503, code => <<"timeout">>, reason => <<"request timed out">>};
+object_error_map(notfound) ->
+    #{status => 404, code => <<"not_found">>, reason => <<"not found">>};
+object_error_map(bucket_type_unknown) ->
+    #{status => 404, code => <<"bucket_type_unknown">>, reason => <<"Unknown bucket type">>};
+object_error_map({deleted, VClock}) ->
+    #{status => 404, code => <<"not_found">>, reason => <<"not found">>,
+      vclock => encode_vclock(VClock)};
+object_error_map({n_val_violation, N}) ->
+    #{status => 400, code => <<"invalid_quorum">>,
+      reason => iolist_to_binary(io_lib:format(
+          "Specified w/dw/pw/node_confirms values invalid for bucket n value of ~p",
+          [N]))};
+object_error_map({r_val_unsatisfied, Requested, Returned}) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => iolist_to_binary(io_lib:format("R-value unsatisfied: ~p/~p", [Returned, Requested]))};
+object_error_map({dw_val_unsatisfied, DW, NumDW}) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => iolist_to_binary(io_lib:format("DW-value unsatisfied: ~p/~p", [NumDW, DW]))};
+object_error_map({pr_val_unsatisfied, Requested, Returned}) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => iolist_to_binary(io_lib:format("PR-value unsatisfied: ~p/~p", [Returned, Requested]))};
+object_error_map({pw_val_unsatisfied, Requested, Returned}) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => iolist_to_binary(io_lib:format("PW-value unsatisfied: ~p/~p", [Returned, Requested]))};
+object_error_map({node_confirms_val_unsatisfied, Requested, Returned}) ->
+    #{status => 503, code => <<"quorum_unsatisfied">>,
+      reason => iolist_to_binary(io_lib:format(
+          "node_confirms-value unsatisfied: ~p/~p", [Returned, Requested]))};
+object_error_map(failed) ->
+    #{status => 412, code => <<"precondition_failed">>, reason => <<"precondition failed">>};
+object_error_map("match_found") ->
+    #{status => 412, code => <<"precondition_failed">>, reason => <<"precondition failed">>};
+object_error_map("modified") ->
+    #{status => 409, code => <<"conflict">>, reason => <<"object was modified">>};
+object_error_map(invalid_vclock) ->
+    #{status => 400, code => <<"invalid_vclock">>, reason => <<"Invalid vector clock">>};
+object_error_map({client_error, Reason}) ->
+    #{status => 503, code => <<"backend_unavailable">>, reason => to_bin(Reason)};
+object_error_map({Class, Reason}) when is_atom(Class) ->
+    #{status => 500, code => <<"backend_error">>,
+      reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))};
+object_error_map(Reason) ->
+    #{status => 500, code => <<"backend_error">>, reason => to_bin(Reason)}.
 
 %%% ============================================================
 %%% Cluster Status

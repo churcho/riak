@@ -11,12 +11,7 @@ init(Req0, RouteOpts) ->
     case normalize_request(Req0, Opts) of
         {ok, Context, Req1} ->
             ReplyOpts = response_opts(Context, #{}),
-            Req2 = riak_admin_api_response:error_reply(
-                501,
-                <<"not_implemented">>,
-                <<"Cowboy substrate route is wired; data-path behavior starts in B02">>,
-                Req1,
-                ReplyOpts),
+            Req2 = dispatch(Context, Req1, Opts, ReplyOpts),
             {ok, Req2, RouteOpts};
         {error, Error, Req1} ->
             Req2 = riak_admin_api_response:reply_error_map(Error, Req1),
@@ -59,6 +54,226 @@ ensure_get(Req) ->
     {ok, map(), cowboy_req:req()} | {error, map(), cowboy_req:req()}.
 normalize_request(Req, Opts) ->
     riak_admin_api_request:normalize(Req, Opts).
+
+dispatch(Context, Req, Opts, ReplyOpts) ->
+    case maps:get(op, Context, undefined) of
+        object_item ->
+            handle_object_item(Context, Req, Opts, ReplyOpts);
+        object_collection ->
+            handle_object_collection(Context, Req, Opts, ReplyOpts);
+        _ ->
+            riak_admin_api_response:error_reply(
+                501,
+                <<"not_implemented">>,
+                <<"Cowboy substrate route is wired; operation is deferred to a later batch">>,
+                Req,
+                ReplyOpts)
+    end.
+
+handle_object_item(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    Input0 = base_backend_input(Context),
+    case Method of
+        <<"GET">> ->
+            execute_backend(get, Context, Input0, Req, Opts, ReplyOpts);
+        <<"HEAD">> ->
+            execute_backend(get, Context, Input0, Req, Opts, ReplyOpts);
+        <<"DELETE">> ->
+            execute_backend(delete, Context, Input0, Req, Opts, ReplyOpts);
+        <<"PUT">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_backend(
+                        put,
+                        Context,
+                        Input0#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        <<"POST">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_backend(
+                        post,
+                        Context,
+                        Input0#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_object_collection(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"POST">> ->
+            with_request_body(
+                Req,
+                fun(Body, Req1) ->
+                    execute_backend(
+                        create,
+                        Context,
+                        (base_backend_input(Context))#{body => Body},
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"POST">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+execute_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
+    Backend = object_backend(Opts),
+    case run_backend(Backend, Action, Context, Input) of
+        {ok, Reply} when is_map(Reply) ->
+            reply_object(Context, Req, Reply, ReplyOpts);
+        {error, Error} when is_map(Error) ->
+            riak_admin_api_response:reply_error_map(with_request_id(Error, ReplyOpts), Req);
+        {error, Reason} ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 500,
+                        code => <<"backend_error">>,
+                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
+                    },
+                    ReplyOpts),
+                Req);
+        Other ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 500,
+                        code => <<"backend_error">>,
+                        reason => iolist_to_binary(io_lib:format(
+                            "Unexpected backend reply: ~p", [Other]))
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+reply_object(Context, Req, Reply, BaseReplyOpts) ->
+    Status = maps:get(status, Reply, 200),
+    Method = maps:get(method, Context, <<"GET">>),
+    Body0 = maps:get(body, Reply, <<>>),
+    Body = case Method of
+        <<"HEAD">> -> <<>>;
+        _ -> Body0
+    end,
+    ReplyOpts = maps:merge(BaseReplyOpts, maps:get(reply_opts, Reply, #{})),
+    Headers0 = maybe_put_content_type(maps:get(content_type, Reply, undefined),
+        maps:get(headers, Reply, #{})),
+    riak_admin_api_response:raw_reply(Status, Body, Req, ReplyOpts, Headers0).
+
+with_request_body(Req, HandlerFun, ReplyOpts) ->
+    case read_request_body(Req) of
+        {ok, Body, Req1} ->
+            HandlerFun(Body, Req1);
+        {error, Reason, Req1} ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 400,
+                        code => <<"invalid_body">>,
+                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
+                    },
+                    ReplyOpts),
+                Req1)
+    end.
+
+read_request_body(Req = #{body := Body}) when is_binary(Body) ->
+    {ok, Body, Req};
+read_request_body(Req = #{body := Body}) when is_list(Body) ->
+    {ok, iolist_to_binary(Body), Req};
+read_request_body(Req = #{body := undefined}) ->
+    {ok, <<>>, Req};
+read_request_body(Req0) ->
+    try read_request_body_chunks(Req0, [])
+    catch
+        Class:Reason -> {error, {Class, Reason}, Req0}
+    end.
+
+read_request_body_chunks(Req0, Acc) ->
+    case cowboy_req:read_body(Req0) of
+        {ok, Body, Req1} ->
+            {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req1};
+        {more, Body, Req1} ->
+            read_request_body_chunks(Req1, [Body | Acc])
+    end.
+
+base_backend_input(Context) ->
+    #{
+        method => maps:get(method, Context, <<"GET">>),
+        query => maps:get(query, Context, #{}),
+        headers => maps:get(headers, Context, #{}),
+        route => maps:get(route, Context, <<"">>)
+    }.
+
+object_backend(Opts) ->
+    case maps:get(object_backend, Opts, undefined) of
+        Backend when is_function(Backend, 3) ->
+            Backend;
+        _ ->
+            fun riak_admin_api_riak:object_operation/3
+    end.
+
+run_backend(Backend, Action, Context, Input) ->
+    try Backend(Action, Context, Input)
+    catch
+        Class:Reason:Stack ->
+            logger:error(
+                "[riak_admin] object backend crashed (~p): ~p:~p~n~p",
+                [Action, Class, Reason, Stack]),
+            {error, #{
+                status => 500,
+                code => <<"backend_error">>,
+                reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
+            }}
+    end.
+
+maybe_put_content_type(undefined, Headers) ->
+    Headers;
+maybe_put_content_type(<<>>, Headers) ->
+    Headers;
+maybe_put_content_type(ContentType, Headers) ->
+    case maps:is_key(<<"content-type">>, Headers) of
+        true -> Headers;
+        false -> Headers#{<<"content-type">> => ContentType}
+    end.
+
+with_request_id(Error, ReplyOpts) ->
+    case maps:is_key(request_id, Error) of
+        true -> Error;
+        false -> Error#{request_id => maps:get(request_id, ReplyOpts, <<"unknown">>)}
+    end.
 
 request_opts(RouteOpts) ->
     RouteMap = case RouteOpts of

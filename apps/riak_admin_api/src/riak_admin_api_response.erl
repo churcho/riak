@@ -4,6 +4,7 @@
 
 -export([
     json_reply/4,
+    raw_reply/5,
     error_reply/5,
     reply_error_map/2,
     error_payload/4,
@@ -34,6 +35,15 @@ json_reply(StatusCode, Data, Req, Opts) ->
             cowboy_req:reply(500, Headers, jsx:encode(Fallback), Req)
     end.
 
+-spec raw_reply(non_neg_integer(), iodata(), cowboy_req:req(), map(), map()) ->
+    cowboy_req:req().
+raw_reply(StatusCode, Body, Req, Opts, ExtraHeaders) ->
+    StartUs = maps:get(start_time_us, Opts, erlang:monotonic_time(microsecond)),
+    Headers = maps:merge(compat_headers(Opts), ExtraHeaders),
+    Req1 = cowboy_req:reply(StatusCode, Headers, Body, Req),
+    maybe_log_telemetry(Opts, StatusCode, StartUs),
+    Req1.
+
 -spec error_reply(non_neg_integer(), binary(), term(), cowboy_req:req(), map()) ->
     cowboy_req:req().
 error_reply(StatusCode, ErrorCode, Reason, Req, Opts) ->
@@ -54,10 +64,14 @@ reply_error_map(Error, Req) ->
     Code = maps:get(code, Error, <<"internal_error">>),
     Reason = maps:get(reason, Error, <<"Internal server error">>),
     Opts0 = #{request_id => maps:get(request_id, Error, <<"unknown">>)},
-    Opts = case maps:find(allow, Error) of
+    Opts1 = case maps:find(allow, Error) of
         {ok, Allow} -> Opts0#{allow => Allow};
         error -> Opts0
     end,
+    Opts2 = maybe_put_opt(vclock, Error, Opts1),
+    Opts3 = maybe_put_opt(etag, Error, Opts2),
+    Opts4 = maybe_put_opt(last_modified, Error, Opts3),
+    Opts = maybe_put_opt(link, Error, Opts4),
     error_reply(Status, Code, Reason, Req, Opts).
 
 -spec error_payload(non_neg_integer(), binary(), term(), binary()) -> map().
@@ -109,6 +123,12 @@ maybe_put_allow(Allow, Headers) when is_list(Allow) ->
     Headers#{<<"allow">> => AllowBin};
 maybe_put_allow(Allow, Headers) ->
     Headers#{<<"allow">> => to_binary(Allow)}.
+
+maybe_put_opt(Key, Source, Target) ->
+    case maps:find(Key, Source) of
+        {ok, Value} -> Target#{Key => Value};
+        error -> Target
+    end.
 
 format_reason(Bin) when is_binary(Bin) -> Bin;
 format_reason(Term) -> iolist_to_binary(io_lib:format("~p", [Term])).

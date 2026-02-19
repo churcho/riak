@@ -152,3 +152,61 @@ collect_local_stats_json_encodable_test() ->
     Encoded = jsx:encode(Stats),
     ?assert(is_binary(Encoded)),
     ?assert(byte_size(Encoded) > 0).
+
+%%% ============================================================
+%%% object_error_map/1 and option helpers
+%%% ============================================================
+
+object_error_map_timeout_test() ->
+    Error = riak_admin_api_riak:object_error_map(timeout),
+    ?assertEqual(503, maps:get(status, Error)),
+    ?assertEqual(<<"timeout">>, maps:get(code, Error)).
+
+object_error_map_conflict_test() ->
+    Error = riak_admin_api_riak:object_error_map("modified"),
+    ?assertEqual(409, maps:get(status, Error)),
+    ?assertEqual(<<"conflict">>, maps:get(code, Error)).
+
+object_error_map_deleted_includes_vclock_test() ->
+    Error = riak_admin_api_riak:object_error_map({deleted, vclock:fresh()}),
+    ?assertEqual(404, maps:get(status, Error)),
+    ?assert(is_binary(maps:get(vclock, Error))).
+
+build_object_options_includes_quorum_and_flags_test() ->
+    Query = #{
+        <<"r">> => quorum,
+        <<"w">> => 2,
+        <<"dw">> => all,
+        <<"timeout">> => 5000,
+        <<"basic_quorum">> => true,
+        <<"notfound_ok">> => false,
+        <<"asis">> => true,
+        <<"sync_on_write">> => <<"backend">>
+    },
+    Options = riak_admin_api_riak:build_object_options(write, Query, []),
+    ?assert(lists:member({r, quorum}, Options)),
+    ?assert(lists:member({w, 2}, Options)),
+    ?assert(lists:member({dw, all}, Options)),
+    ?assert(lists:member({timeout, 5000}, Options)),
+    ?assert(lists:member({basic_quorum, true}, Options)),
+    ?assert(lists:member({notfound_ok, false}, Options)),
+    ?assert(lists:member({asis, true}, Options)),
+    ?assert(lists:member({sync_on_write, backend}, Options)).
+
+build_location_respects_alias_families_test() ->
+    Key = <<"alice">>,
+    ?assertEqual(
+        <<"/riak/users/alice">>,
+        riak_admin_api_riak:build_location(
+            #{alias => riak, bucket => <<"users">>, bucket_type => <<"default">>},
+            Key)),
+    ?assertEqual(
+        <<"/buckets/users/keys/alice">>,
+        riak_admin_api_riak:build_location(
+            #{alias => buckets, bucket => <<"users">>, bucket_type => <<"default">>},
+            Key)),
+    ?assertEqual(
+        <<"/types/maps/buckets/users/keys/alice">>,
+        riak_admin_api_riak:build_location(
+            #{alias => types, bucket_type => <<"maps">>, bucket => <<"users">>},
+            Key)).

@@ -41,6 +41,7 @@ normalize_query_boolean_and_quorum_test() ->
     Query0 = #{
         <<"basic_quorum">> => <<"TRUE">>,
         <<"returnbody">> => <<"false">>,
+        <<"asis">> => <<"true">>,
         <<"r">> => <<"quorum">>,
         <<"w">> => <<"2">>,
         <<"timeout">> => <<"5000">>
@@ -48,6 +49,7 @@ normalize_query_boolean_and_quorum_test() ->
     {ok, Query} = riak_admin_api_request:normalize_query(Query0),
     ?assertEqual(true, maps:get(<<"basic_quorum">>, Query)),
     ?assertEqual(false, maps:get(<<"returnbody">>, Query)),
+    ?assertEqual(true, maps:get(<<"asis">>, Query)),
     ?assertEqual(quorum, maps:get(<<"r">>, Query)),
     ?assertEqual(2, maps:get(<<"w">>, Query)),
     ?assertEqual(5000, maps:get(<<"timeout">>, Query)).
