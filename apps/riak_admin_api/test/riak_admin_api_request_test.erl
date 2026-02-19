@@ -385,6 +385,61 @@ security_hook_denies_test() ->
     ?assertEqual(<<"forbidden">>, maps:get(code, Err)),
     ?assertEqual(<<"blocked">>, maps:get(reason, Err)).
 
+normalize_cutover_disabled_mode_blocks_endpoint_group_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-disabled">>}
+    },
+    Opts = #{
+        cutover_op_modes => #{object_item => disabled}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"route_cutover_disabled">>, maps:get(code, Err)),
+    ?assertEqual(<<"rid-cutover-disabled">>, maps:get(request_id, Err)).
+
+normalize_cutover_removed_mode_returns_gone_test() ->
+    Req0 = #{
+        method => <<"POST">>,
+        path => <<"/types/maps/buckets/users/datatypes">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-removed">>}
+    },
+    Opts = #{
+        cutover_op_modes => #{crdt_collection => removed}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(410, maps:get(status, Err)),
+    ?assertEqual(<<"route_removed">>, maps:get(code, Err)),
+    ?assertEqual(<<"rid-cutover-removed">>, maps:get(request_id, Err)).
+
+normalize_cutover_default_disabled_blocks_unmapped_ops_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/mapred">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-default-disabled">>}
+    },
+    Opts = #{
+        cutover_default_mode => disabled,
+        cutover_op_modes => #{object_item => enabled}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"route_cutover_disabled">>, maps:get(code, Err)).
+
+normalize_cutover_explicit_enabled_overrides_default_disabled_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/mapred">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-enabled">>}
+    },
+    Opts = #{
+        cutover_default_mode => disabled,
+        cutover_op_modes => #{mapred => enabled}
+    },
+    {ok, Context, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(mapred, maps:get(op, Context)).
+
 normalize_full_request_test() ->
     Req0 = #{
         method => <<"GET">>,

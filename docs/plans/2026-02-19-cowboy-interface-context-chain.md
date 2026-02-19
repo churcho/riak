@@ -21,7 +21,7 @@ This file is the cross-branch handoff ledger for new context windows/agents.
 | B05 | `feature/cowboy-b05-query-mapred` | 70b1f2f9 | see_report_back_output | N/A (report-back) | Done | Implemented query + mapreduce route/parser/dispatch/gateway parity, added B05 parity artifact with route matching evidence, and verified via `./rebar3 eunit apps=riak_admin_api`; mapreduce chunked transport remains aggregated-body compatibility mode |
 | B06 | `feature/cowboy-b06-crdt-counter` | fc1758db | see_report_back_output | N/A (report-back) | Done | Implemented counter + CRDT route/parser/dispatch/gateway parity, added B06 parity artifact with route matching evidence, and verified via `./rebar3 eunit apps=riak_admin_api` |
 | B07 | `feature/cowboy-b07-verification-perf` | 80d4f625 | see_report_back_output | N/A (report-back) | Done | Added B07 contract harness + perf probe scripts, observability mapping, and release gates; verified with `./apps/riak_admin_api/test/cowboy_contract_harness.sh`, `./apps/riak_admin_api/test/cowboy_perf_probe.escript`, and `./rebar3 eunit apps=riak_admin_api` (200 passing) |
-| B08 | `feature/cowboy-b08-cutover` | TBD | TBD | TBD | Planned | Cutover and deprecation |
+| B08 | `feature/cowboy-b08-cutover` | f578683f | see_report_back_output | N/A (report-back) | Done | Added op-level cutover/rollback controls (`cowboy_cutover_default_mode`, `cowboy_cutover_op_modes`), authored cutover + rollback + client migration artifacts with Route Matching Evidence for gated endpoints, and verified with dry-run targeted EUnit commands plus `./rebar3 eunit apps=riak_admin_api` |
 
 ## Deferred roadmap ledger (post-B08)
 

@@ -47,11 +47,16 @@ normalize(Req0, Opts) ->
                                 ok ->
                                     case ensure_allowed_method(Method, Context0) of
                                         ok ->
-                                            case ensure_security(Context0, Opts) of
+                                            case ensure_cutover(Context0, Opts) of
                                                 ok ->
-                                                    {ok, Context0, Req0};
-                                                {error, Err3} ->
-                                                    {error, with_request_id(Err3, RequestId), Req0}
+                                                    case ensure_security(Context0, Opts) of
+                                                        ok ->
+                                                            {ok, Context0, Req0};
+                                                        {error, Err3} ->
+                                                            {error, with_request_id(Err3, RequestId), Req0}
+                                                    end;
+                                                {error, Err6} ->
+                                                    {error, with_request_id(Err6, RequestId), Req0}
                                             end;
                                         {error, Err4} ->
                                             {error, with_request_id(Err4, RequestId), Req0}
@@ -452,6 +457,82 @@ allowed_methods(object_collection, _) -> [<<"POST">>];
 allowed_methods(object_item, _) -> [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>];
 allowed_methods(index_query, _) -> [<<"GET">>, <<"HEAD">>];
 allowed_methods(_, _) -> [<<"GET">>].
+
+ensure_cutover(Context, Opts) ->
+    Op = maps:get(op, Context, undefined),
+    case resolve_cutover_mode(Op, Opts) of
+        enabled ->
+            ok;
+        deprecated ->
+            ok;
+        shadow ->
+            ok;
+        disabled ->
+            {error, #{
+                status => 503,
+                code => <<"route_cutover_disabled">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Endpoint group ~p is disabled by cutover controls", [Op]))
+            }};
+        removed ->
+            {error, #{
+                status => 410,
+                code => <<"route_removed">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Endpoint group ~p has been removed", [Op]))
+            }};
+        _ ->
+            ok
+    end.
+
+resolve_cutover_mode(Op, Opts) ->
+    DefaultMode = normalize_cutover_mode(
+        maps:get(cutover_default_mode, Opts, enabled)),
+    Modes = maps:get(cutover_op_modes, Opts, #{}),
+    case lookup_cutover_mode(Op, Modes) of
+        undefined -> DefaultMode;
+        Mode -> normalize_cutover_mode(Mode)
+    end.
+
+lookup_cutover_mode(Op, Modes) when is_map(Modes) ->
+    OpBin = atom_to_binary(Op, utf8),
+    case maps:find(Op, Modes) of
+        {ok, Mode} ->
+            Mode;
+        error ->
+            case maps:find(OpBin, Modes) of
+                {ok, Mode} -> Mode;
+                error -> undefined
+            end
+    end;
+lookup_cutover_mode(Op, Modes) when is_list(Modes) ->
+    OpBin = atom_to_binary(Op, utf8),
+    proplists:get_value(
+        Op,
+        Modes,
+        proplists:get_value(
+            OpBin,
+            Modes,
+            proplists:get_value(binary_to_list(OpBin), Modes, undefined)));
+lookup_cutover_mode(_, _) ->
+    undefined.
+
+normalize_cutover_mode(enabled) -> enabled;
+normalize_cutover_mode(disabled) -> disabled;
+normalize_cutover_mode(removed) -> removed;
+normalize_cutover_mode(deprecated) -> deprecated;
+normalize_cutover_mode(shadow) -> shadow;
+normalize_cutover_mode(<<"enabled">>) -> enabled;
+normalize_cutover_mode(<<"disabled">>) -> disabled;
+normalize_cutover_mode(<<"removed">>) -> removed;
+normalize_cutover_mode(<<"deprecated">>) -> deprecated;
+normalize_cutover_mode(<<"shadow">>) -> shadow;
+normalize_cutover_mode("enabled") -> enabled;
+normalize_cutover_mode("disabled") -> disabled;
+normalize_cutover_mode("removed") -> removed;
+normalize_cutover_mode("deprecated") -> deprecated;
+normalize_cutover_mode("shadow") -> shadow;
+normalize_cutover_mode(_) -> enabled.
 
 normalize_query_entries([], Acc) ->
     {ok, Acc};

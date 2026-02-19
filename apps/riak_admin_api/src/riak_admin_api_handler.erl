@@ -800,9 +800,25 @@ request_opts(RouteOpts) ->
         riak_admin_api,
         security_trusted_origins,
         []),
+    DefaultCutoverMode = application:get_env(
+        riak_admin_api,
+        cowboy_cutover_default_mode,
+        enabled),
+    DefaultCutoverOpModes = application:get_env(
+        riak_admin_api,
+        cowboy_cutover_op_modes,
+        #{}),
     RouteMap#{
         require_tls => maps:get(require_tls, RouteMap, DefaultRequireTLS),
-        trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins)
+        trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins),
+        cutover_default_mode => maps:get(
+            cutover_default_mode,
+            RouteMap,
+            DefaultCutoverMode),
+        cutover_op_modes => maps:get(
+            cutover_op_modes,
+            RouteMap,
+            DefaultCutoverOpModes)
     }.
 
 req_response_opts(Req) ->

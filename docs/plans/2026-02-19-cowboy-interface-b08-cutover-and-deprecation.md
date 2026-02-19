@@ -51,21 +51,27 @@ Execute controlled cutover to Cowboy-first HTTP handling with clear rollback opt
 
 ```yaml
 batch: B08
-status: planned
+status: done
 branch: feature/cowboy-b08-cutover
-base_commit: TBD
-end_commit: TBD
+base_commit: f578683f
+end_commit: see_report_back_output
 artifacts:
   - docs/plans/artifacts/cowboy-cutover-runbook.md
   - docs/plans/artifacts/cowboy-rollback-runbook.md
   - docs/plans/artifacts/cowboy-client-migration-notes.md
 decisions:
-  - TBD
+  - Added route-level cutover controls using `cowboy_cutover_default_mode` and `cowboy_cutover_op_modes`, enforced after normalization by endpoint-group `op`.
+  - Kept route parser and backend mapping behavior unchanged in B08; documented Route Matching Evidence for gated endpoint groups in cutover/rollback artifacts.
+  - Finalized staged rollout and rollback procedures with dry-run commands and explicit go/no-go checkpoints.
+  - Finalized legacy route timeline: `/riak/...` and `/mapred` deprecated on 2026-03-10, planned removal date 2026-09-30.
 open_risks:
-  - TBD
+  - Incorrect runtime cutover mode configuration can unintentionally disable critical endpoint groups.
+  - Removal timeline enforcement depends on release and operator communication discipline, not code-only controls.
+  - Production-load behavior for stream-like traffic still relies on aggregated compatibility semantics from B03-B07.
 handoff_notes:
   - migration complete
   - next optional track: D01 multi-DC distribution follow-up
+  - do not couple D01 multi-DC routing/distribution changes into B08 cutover controls
 ```
 
 ## Route Matching and Parser Discipline (required)
