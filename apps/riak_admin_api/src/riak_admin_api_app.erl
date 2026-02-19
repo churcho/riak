@@ -180,6 +180,10 @@ resolve_riak_http_port() ->
 %% with Riak's existing modules.
 -spec routes() -> [cowboy_router:route_path()].
 routes() ->
+    admin_routes() ++ substrate_routes().
+
+-spec admin_routes() -> [cowboy_router:route_path()].
+admin_routes() ->
     [
         {"/api/ping",              rah_ping, []},
         {"/api/cluster/status",    rah_cluster, []},
@@ -191,4 +195,32 @@ routes() ->
         %% M7: {"/api/kv/:type/:bucket/:key",     rah_kv, []}
         %% M7: {"/api/bucket-types",              rah_bucket_types, []}
         %% M8: {"/api/stream/events",             rah_events_ws, []}
+    ].
+
+-spec substrate_routes() -> [cowboy_router:route_path()].
+substrate_routes() ->
+    [
+        %% Legacy alias family
+        {"/riak", riak_admin_api_handler, #{route_family => riak}},
+        {"/riak/:bucket", riak_admin_api_handler, #{route_family => riak}},
+        {"/riak/:bucket/:key", riak_admin_api_handler, #{route_family => riak}},
+
+        %% Default-type modern alias family
+        {"/buckets", riak_admin_api_handler, #{route_family => buckets}},
+        {"/buckets/:bucket/props", riak_admin_api_handler, #{route_family => buckets}},
+        {"/buckets/:bucket/keys", riak_admin_api_handler, #{route_family => buckets}},
+        {"/buckets/:bucket/keys/:key", riak_admin_api_handler,
+            #{route_family => buckets}},
+
+        %% Typed modern alias family
+        {"/types/:bucket_type/props", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/props", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/keys", riak_admin_api_handler,
+            #{route_family => types}},
+        {"/types/:bucket_type/buckets/:bucket/keys/:key", riak_admin_api_handler,
+            #{route_family => types}}
     ].

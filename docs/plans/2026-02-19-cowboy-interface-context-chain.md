@@ -14,7 +14,7 @@ This file is the cross-branch handoff ledger for new context windows/agents.
 | Batch | Branch | Base Commit | End Commit | PR | Status | Notes |
 |---|---|---|---|---|---|---|
 | B00 | `feature/cowboy-b00-baseline-contracts` | 88a1df3f | TBD | TBD | In Progress | Artifacts drafted, contract test added, `./rebar3 eunit apps=riak_admin_api` passing |
-| B01 | `feature/cowboy-b01-http-substrate` | TBD | TBD | TBD | Planned | Shared request/response/security substrate |
+| B01 | `feature/cowboy-b01-http-substrate` | f241db0a | see_report_back_output | N/A (report-back) | Done | Added shared request/response substrate, alias routing, security/error policy artifacts, and passing eunit verification |
 | B02 | `feature/cowboy-b02-object-crud` | TBD | TBD | TBD | Planned | Object CRUD parity |
 | B03 | `feature/cowboy-b03-bucket-type` | TBD | TBD | TBD | Planned | Bucket and bucket-type endpoints |
 | B04 | `feature/cowboy-b04-keylist-2i` | TBD | TBD | TBD | Planned | Key listing and index endpoints |

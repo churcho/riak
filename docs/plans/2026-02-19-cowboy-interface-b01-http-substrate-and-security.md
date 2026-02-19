@@ -56,19 +56,23 @@ Implement the shared Cowboy request/response substrate that all data-path handle
 
 ```yaml
 batch: B01
-status: planned
+status: done
 branch: feature/cowboy-b01-http-substrate
-base_commit: TBD
-end_commit: TBD
+base_commit: f241db0a
+end_commit: see_report_back_output
 artifacts:
   - docs/plans/artifacts/cowboy-error-taxonomy.md
   - docs/plans/artifacts/cowboy-security-policy.md
 decisions:
-  - TBD
+  - Introduced `riak_admin_api_request` as the canonical alias/query/security normalization layer for `/riak`, `/buckets`, and `/types` route families.
+  - Introduced `riak_admin_api_response` as the shared error/JSON serializer with compatibility headers and request ID propagation.
+  - Wired alias routes to `riak_admin_api_handler` with explicit `501 not_implemented` substrate stubs so B02 can focus on operation dispatch.
 open_risks:
-  - TBD
+  - Authn/authz hooks are pluggable but not yet wired to production identity modules.
+  - Data-path behavior remains deferred; B02 must replace substrate stubs with operation handlers.
 handoff_notes:
-  - Ensure B02 uses substrate helpers only
+  - B02 should call `riak_admin_api_request:normalize/2` at handler ingress and `riak_admin_api_response:*` for all replies.
+  - Preserve alias route wiring in `riak_admin_api_app:substrate_routes/0`; only replace `501` flow with op dispatch.
 ```
 
 ## Sync-Back Command (required)

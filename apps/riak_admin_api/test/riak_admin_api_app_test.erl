@@ -85,7 +85,7 @@ routes_defined_test() ->
     lists:foreach(fun({Path, Handler, Opts}) ->
         ?assert(is_list(Path) orelse is_binary(Path)),
         ?assert(is_atom(Handler)),
-        ?assert(is_list(Opts))
+        ?assert(is_list(Opts) orelse is_map(Opts))
     end, Routes).
 
 routes_contain_ping_test() ->
@@ -99,11 +99,21 @@ routes_contain_cluster_status_test() ->
     ?assert(lists:member("/api/cluster/status", Paths)).
 
 routes_handler_naming_test() ->
-    %% All handlers should use the rah_ prefix
+    %% App routes keep the rah_ naming convention; the shared
+    %% substrate entrypoint is the only intentional exception.
     Routes = riak_admin_api_app:routes(),
     lists:foreach(fun({_Path, Handler, _Opts}) ->
         HandlerStr = atom_to_list(Handler),
-        ?assert(lists:prefix("rah_", HandlerStr),
+        IsAllowed = lists:prefix("rah_", HandlerStr) orelse
+            Handler =:= riak_admin_api_handler,
+        ?assert(IsAllowed,
                 lists:flatten(io_lib:format(
-                    "Handler ~p does not use rah_ prefix", [Handler])))
+                    "Handler ~p is not an approved route handler", [Handler])))
     end, Routes).
+
+routes_include_cowboy_alias_families_test() ->
+    Routes = riak_admin_api_app:routes(),
+    Paths = [Path || {Path, _, _} <- Routes],
+    ?assert(lists:member("/riak", Paths)),
+    ?assert(lists:member("/buckets", Paths)),
+    ?assert(lists:member("/types/:bucket_type/buckets", Paths)).
