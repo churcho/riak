@@ -61,6 +61,48 @@ normalize_collection_alias_equivalence_test() ->
     ?assertEqual(Canonical, pick_canonical(BucketsReq)),
     ?assertEqual(Canonical, pick_canonical(TypesReq)).
 
+normalize_bucket_props_alias_equivalence_test() ->
+    {ok, RiakReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/riak/users">>, #{}),
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/buckets/users/props">>, #{}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/default/buckets/users/props">>, #{}),
+
+    Canonical = #{
+        op => bucket_props,
+        bucket_type => <<"default">>,
+        bucket => <<"users">>,
+        key => undefined
+    },
+
+    ?assertEqual(Canonical, pick_canonical(RiakReq)),
+    ?assertEqual(Canonical, pick_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_canonical(TypesReq)).
+
+normalize_bucket_type_props_path_test() ->
+    {ok, Req} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/maps/props">>, #{}),
+    ?assertEqual(bucket_type_props, maps:get(op, Req)),
+    ?assertEqual(types, maps:get(alias, Req)),
+    ?assertEqual(<<"maps">>, maps:get(bucket_type, Req)),
+    ?assertEqual(undefined, maps:get(bucket, Req)).
+
+normalize_bucket_list_alias_and_stream_mode_test() ->
+    {ok, RiakReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/riak">>, #{<<"buckets">> => <<"stream">>}),
+    {ok, BucketsReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/buckets">>, #{<<"buckets">> => <<"true">>}),
+    {ok, TypesReq} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/types/maps/buckets">>, #{<<"buckets">> => <<"true">>}),
+
+    ?assertEqual(buckets, maps:get(op, RiakReq)),
+    ?assertEqual(buckets, maps:get(op, BucketsReq)),
+    ?assertEqual(buckets, maps:get(op, TypesReq)),
+    ?assertEqual(buckets, maps:get(stream_mode, maps:get(query, RiakReq))),
+    ?assertEqual(none, maps:get(stream_mode, maps:get(query, BucketsReq))),
+    ?assertEqual(<<"maps">>, maps:get(bucket_type, TypesReq)).
+
 normalize_legacy_riak_ambiguous_bucket_test() ->
     {ok, KeysReq} = riak_admin_api_request:normalize_path(
         <<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"stream">>}),

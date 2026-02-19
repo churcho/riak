@@ -45,6 +45,7 @@
     handoff_status/0,
     aae_status/0,
     object_operation/3,
+    bucket_operation/3,
     %% syn-powered DC discovery
     list_dcs/0,
     remote_dcs/0,
@@ -77,6 +78,7 @@
 
 -define(USERMETA_PREFIX, <<"x-riak-meta-">>).
 -define(INDEX_PREFIX, <<"x-riak-index-">>).
+-define(DEFAULT_BUCKET_LIST_TIMEOUT, 5 * 60000).
 
 %% Types
 -export_type([dc_info/0]).
@@ -124,6 +126,79 @@ object_operation(_, _Context, _Input, _Client) ->
         status => 400,
         code => <<"invalid_operation">>,
         reason => <<"Unsupported object operation">>
+    }}.
+
+-spec bucket_operation(
+    get_bucket_props |
+    set_bucket_props |
+    delete_bucket_props |
+    get_bucket_type_props |
+    set_bucket_type_props |
+    list_buckets,
+    map(),
+    map()) -> {ok, map()} | {error, map()}.
+bucket_operation(Action, Context, Input) ->
+    case ensure_bucket_type(Context) of
+        ok ->
+            with_object_client(
+                fun(Client) -> bucket_operation(Action, Context, Input, Client) end);
+        {error, Error} ->
+            {error, Error}
+    end.
+
+bucket_operation(get_bucket_props, Context, _Input, Client) ->
+    BucketRef = bucket_props_ref(Context),
+    Props = riak_client:get_bucket(BucketRef, Client),
+    JsonProps = lists:map(fun riak_kv_wm_utils:jsonify_bucket_prop/1, Props),
+    Body = mochijson2:encode({struct, [{?JSON_PROPS, {struct, JsonProps}}]}),
+    {ok, json_backend_reply(200, Body)};
+bucket_operation(set_bucket_props, Context, Input, Client) ->
+    case extract_bucket_props(Input) of
+        {ok, Props} ->
+            ErlProps = lists:map(fun riak_kv_wm_utils:erlify_bucket_prop/1, Props),
+            case riak_client:set_bucket(bucket_props_ref(Context), ErlProps, Client) of
+                ok ->
+                    {ok, json_backend_reply(204, <<>>)};
+                {error, Details} ->
+                    {error, bucket_error_map({invalid_props, Details})}
+            end;
+        {error, Error} ->
+            {error, Error}
+    end;
+bucket_operation(delete_bucket_props, Context, _Input, Client) ->
+    _ = riak_client:reset_bucket(bucket_props_ref(Context), Client),
+    {ok, json_backend_reply(204, <<>>)};
+bucket_operation(get_bucket_type_props, Context, _Input, _Client) ->
+    Type = maps:get(bucket_type, Context, <<"default">>),
+    case riak_core_bucket_type:get(Type) of
+        undefined ->
+            {error, object_error_map(bucket_type_unknown)};
+        Props ->
+            JsonProps = [riak_kv_wm_utils:jsonify_bucket_prop(P) || P <- Props],
+            Body = mochijson2:encode({struct, [{?JSON_PROPS, JsonProps}]}),
+            {ok, json_backend_reply(200, Body)}
+    end;
+bucket_operation(set_bucket_type_props, Context, Input, _Client) ->
+    case extract_bucket_props(Input) of
+        {ok, Props} ->
+            ErlProps = lists:map(fun riak_kv_wm_utils:erlify_bucket_prop/1, Props),
+            Type = maps:get(bucket_type, Context, <<"default">>),
+            case riak_core_bucket_type:update(Type, ErlProps) of
+                ok ->
+                    {ok, json_backend_reply(204, <<>>)};
+                {error, Details} ->
+                    {error, bucket_error_map({invalid_props, Details})}
+            end;
+        {error, Error} ->
+            {error, Error}
+    end;
+bucket_operation(list_buckets, Context, _Input, Client) ->
+    bucket_list_operation(Context, Client);
+bucket_operation(_, _Context, _Input, _Client) ->
+    {error, #{
+        status => 400,
+        code => <<"invalid_operation">>,
+        reason => <<"Unsupported bucket operation">>
     }}.
 
 object_get(Context, Input, Client) ->
@@ -729,6 +804,104 @@ object_error_map({Class, Reason}) when is_atom(Class) ->
       reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))};
 object_error_map(Reason) ->
     #{status => 500, code => <<"backend_error">>, reason => to_bin(Reason)}.
+
+bucket_props_ref(Context) ->
+    {maps:get(bucket_type, Context, <<"default">>), maps:get(bucket, Context, undefined)}.
+
+json_backend_reply(Status, Body) ->
+    #{
+        status => Status,
+        body => Body,
+        content_type => <<"application/json; charset=utf-8">>
+    }.
+
+extract_bucket_props(Input) ->
+    case maps:get(props, Input, undefined) of
+        Props when is_list(Props) ->
+            {ok, Props};
+        _ ->
+            decode_bucket_props_body(maps:get(body, Input, <<>>))
+    end.
+
+decode_bucket_props_body(Body) ->
+    case catch mochijson2:decode(Body) of
+        {struct, Fields} ->
+            case proplists:get_value(?JSON_PROPS, Fields) of
+                {struct, Props} when is_list(Props) ->
+                    {ok, Props};
+                _ ->
+                    {error, bucket_error_map(invalid_body)}
+            end;
+        _ ->
+            {error, bucket_error_map(invalid_body)}
+    end.
+
+bucket_error_map(invalid_body) ->
+    #{
+        status => 400,
+        code => <<"invalid_body">>,
+        reason => <<"Body must be JSON: {\"props\": {...}}">>
+    };
+bucket_error_map({invalid_props, Details}) ->
+    #{
+        status => 400,
+        code => <<"invalid_props">>,
+        reason => to_bin(Details)
+    };
+bucket_error_map(Reason) ->
+    object_error_map(Reason).
+
+bucket_list_operation(Context, Client) ->
+    Query = maps:get(query, Context, #{}),
+    BucketType = maps:get(bucket_type, Context, <<"default">>),
+    Timeout = maps:get(<<"timeout">>, Query, ?DEFAULT_BUCKET_LIST_TIMEOUT),
+    case maps:get(<<"buckets">>, Query, undefined) of
+        true ->
+            list_buckets_reply(BucketType, Timeout, Client);
+        <<"true">> ->
+            list_buckets_reply(BucketType, Timeout, Client);
+        <<"stream">> ->
+            stream_buckets_reply(BucketType, Timeout, Client);
+        _ ->
+            {ok, json_backend_reply(200, encode_bucket_list([]))}
+    end.
+
+list_buckets_reply(BucketType, Timeout, Client) ->
+    case riak_client:list_buckets(none, Timeout, BucketType, Client) of
+        {ok, Buckets} ->
+            {ok, json_backend_reply(200, encode_bucket_list(Buckets))};
+        {error, Reason} ->
+            {error, bucket_error_map(Reason)}
+    end.
+
+stream_buckets_reply(BucketType, Timeout, Client) ->
+    case riak_client:stream_list_buckets(none, Timeout, BucketType, Client) of
+        {ok, ReqId} ->
+            Body = collect_stream_buckets(ReqId, [], Timeout),
+            {ok, json_backend_reply(200, Body)};
+        {error, Reason} ->
+            {error, bucket_error_map(Reason)}
+    end.
+
+collect_stream_buckets(ReqId, Acc, Timeout) ->
+    receive
+        {ReqId, done} ->
+            iolist_to_binary(lists:reverse([encode_bucket_list([]) | Acc]));
+        {ReqId, _From, {buckets_stream, Buckets}} ->
+            collect_stream_buckets(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
+        {ReqId, {buckets_stream, Buckets}} ->
+            collect_stream_buckets(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
+        {ReqId, {error, timeout}} ->
+            iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
+    after Timeout ->
+        iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
+    end.
+
+encode_bucket_list(Buckets) ->
+    mochijson2:encode({struct, [{?JSON_BUCKETS, Buckets}]}).
+
+encode_bucket_stream_timeout() ->
+    mochijson2:encode({struct, [{error, timeout}]}).
 
 %%% ============================================================
 %%% Cluster Status

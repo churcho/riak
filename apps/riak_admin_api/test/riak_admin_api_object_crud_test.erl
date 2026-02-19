@@ -225,16 +225,11 @@ keys_method_not_allowed_allow_header_contract_test() ->
     Decoded = jsx:decode(Body, [return_maps]),
     ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Decoded)).
 
-deferred_non_object_routes_return_not_implemented_test_() ->
+deferred_b04_routes_return_not_implemented_test_() ->
     Cases = [
-        {<<"GET">>, <<"/riak">>, #{}, buckets},
-        {<<"GET">>, <<"/riak/users">>, #{}, bucket_props},
         {<<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"true">>}, keys},
-        {<<"GET">>, <<"/buckets/users/props">>, #{}, bucket_props},
+        {<<"GET">>, <<"/riak/users">>, #{<<"keys">> => <<"stream">>}, keys},
         {<<"GET">>, <<"/buckets/users/keys">>, #{}, keys},
-        {<<"GET">>, <<"/types/maps/props">>, #{}, bucket_type_props},
-        {<<"GET">>, <<"/types/maps/buckets">>, #{}, buckets},
-        {<<"GET">>, <<"/types/maps/buckets/users/props">>, #{}, bucket_props},
         {<<"GET">>, <<"/types/maps/buckets/users/keys">>, #{}, keys}
     ],
     [?_test(assert_deferred_route_case(Case)) || Case <- Cases].

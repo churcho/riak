@@ -57,6 +57,12 @@ normalize_request(Req, Opts) ->
 
 dispatch(Context, Req, Opts, ReplyOpts) ->
     case maps:get(op, Context, undefined) of
+        bucket_props ->
+            handle_bucket_props(Context, Req, Opts, ReplyOpts);
+        bucket_type_props ->
+            handle_bucket_type_props(Context, Req, Opts, ReplyOpts);
+        buckets ->
+            handle_bucket_listing(Context, Req, Opts, ReplyOpts);
         object_item ->
             handle_object_item(Context, Req, Opts, ReplyOpts);
         object_collection ->
@@ -68,6 +74,117 @@ dispatch(Context, Req, Opts, ReplyOpts) ->
                 <<"Cowboy substrate route is wired; operation is deferred to a later batch">>,
                 Req,
                 ReplyOpts)
+    end.
+
+handle_bucket_props(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    Input0 = base_backend_input(Context),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(get_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(get_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
+        <<"PUT">> ->
+            with_props_body(
+                Req,
+                fun(Body, Props, Req1) ->
+                    execute_bucket_backend(
+                        set_bucket_props,
+                        Context,
+                        Input0#{
+                            body => Body,
+                            props => Props
+                        },
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        <<"DELETE">> ->
+            execute_bucket_backend(delete_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"DELETE">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_bucket_type_props(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    Input0 = base_backend_input(Context),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(get_bucket_type_props, Context, Input0, Req, Opts, ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(get_bucket_type_props, Context, Input0, Req, Opts, ReplyOpts);
+        <<"PUT">> ->
+            with_props_body(
+                Req,
+                fun(Body, Props, Req1) ->
+                    execute_bucket_backend(
+                        set_bucket_type_props,
+                        Context,
+                        Input0#{
+                            body => Body,
+                            props => Props
+                        },
+                        Req1,
+                        Opts,
+                        ReplyOpts)
+                end,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>]
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
+handle_bucket_listing(Context, Req, Opts, ReplyOpts) ->
+    Method = maps:get(method, Context, <<"GET">>),
+    case Method of
+        <<"GET">> ->
+            execute_bucket_backend(
+                list_buckets,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        <<"HEAD">> ->
+            execute_bucket_backend(
+                list_buckets,
+                Context,
+                base_backend_input(Context),
+                Req,
+                Opts,
+                ReplyOpts);
+        _ ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 405,
+                        code => <<"method_not_allowed">>,
+                        reason => iolist_to_binary(
+                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                        allow => [<<"GET">>, <<"HEAD">>]
+                    },
+                    ReplyOpts),
+                Req)
     end.
 
 handle_object_item(Context, Req, Opts, ReplyOpts) ->
@@ -180,6 +297,36 @@ execute_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
                 Req)
     end.
 
+execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
+    Backend = bucket_backend(Opts),
+    case run_bucket_backend(Backend, Action, Context, Input) of
+        {ok, Reply} when is_map(Reply) ->
+            reply_object(Context, Req, Reply, ReplyOpts);
+        {error, Error} when is_map(Error) ->
+            riak_admin_api_response:reply_error_map(with_request_id(Error, ReplyOpts), Req);
+        {error, Reason} ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 500,
+                        code => <<"backend_error">>,
+                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
+                    },
+                    ReplyOpts),
+                Req);
+        Other ->
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 500,
+                        code => <<"backend_error">>,
+                        reason => iolist_to_binary(io_lib:format(
+                            "Unexpected backend reply: ~p", [Other]))
+                    },
+                    ReplyOpts),
+                Req)
+    end.
+
 reply_object(Context, Req, Reply, BaseReplyOpts) ->
     Status = maps:get(status, Reply, 200),
     Method = maps:get(method, Context, <<"GET">>),
@@ -207,6 +354,40 @@ with_request_body(Req, HandlerFun, ReplyOpts) ->
                     },
                     ReplyOpts),
                 Req1)
+    end.
+
+with_props_body(Req, HandlerFun, ReplyOpts) ->
+    with_request_body(
+        Req,
+        fun(Body, Req1) ->
+            case decode_props_body(Body) of
+                {ok, Props} ->
+                    HandlerFun(Body, Props, Req1);
+                {error, Reason} ->
+                    riak_admin_api_response:reply_error_map(
+                        with_request_id(
+                            #{
+                                status => 400,
+                                code => <<"invalid_body">>,
+                                reason => Reason
+                            },
+                            ReplyOpts),
+                        Req1)
+            end
+        end,
+        ReplyOpts).
+
+decode_props_body(Body) ->
+    case catch mochijson2:decode(Body) of
+        {struct, Fields} ->
+            case proplists:get_value(<<"props">>, Fields) of
+                {struct, Props} when is_list(Props) ->
+                    {ok, Props};
+                _ ->
+                    {error, <<"Body must be JSON: {\"props\": {...}}">>}
+            end;
+        _ ->
+            {error, <<"Body must be JSON: {\"props\": {...}}">>}
     end.
 
 read_request_body(Req = #{body := Body}) when is_binary(Body) ->
@@ -245,12 +426,34 @@ object_backend(Opts) ->
             fun riak_admin_api_riak:object_operation/3
     end.
 
+bucket_backend(Opts) ->
+    case maps:get(bucket_backend, Opts, undefined) of
+        Backend when is_function(Backend, 3) ->
+            Backend;
+        _ ->
+            fun riak_admin_api_riak:bucket_operation/3
+    end.
+
 run_backend(Backend, Action, Context, Input) ->
     try Backend(Action, Context, Input)
     catch
         Class:Reason:Stack ->
             logger:error(
                 "[riak_admin] object backend crashed (~p): ~p:~p~n~p",
+                [Action, Class, Reason, Stack]),
+            {error, #{
+                status => 500,
+                code => <<"backend_error">>,
+                reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
+            }}
+    end.
+
+run_bucket_backend(Backend, Action, Context, Input) ->
+    try Backend(Action, Context, Input)
+    catch
+        Class:Reason:Stack ->
+            logger:error(
+                "[riak_admin] bucket backend crashed (~p): ~p:~p~n~p",
                 [Action, Class, Reason, Stack]),
             {error, #{
                 status => 500,
