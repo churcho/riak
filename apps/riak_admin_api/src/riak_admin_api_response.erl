@@ -1,4 +1,12 @@
-%% @doc Shared response serializer with compatibility headers.
+%% @doc Shared response serializer for the Cowboy admin API.
+%%
+%% All HTTP responses flow through this module. It handles JSON
+%% encoding, error formatting, compatibility headers (vclock, etag,
+%% link), CORS, telemetry logging, and chunked streaming.
+%%
+%% Handler modules call json_reply/4 or error_reply/5 for normal
+%% responses, and stream_reply_init/4 + stream_reply_body/3 for
+%% incremental streaming (key lists, mapreduce chunks).
 
 -module(riak_admin_api_response).
 
@@ -15,7 +23,9 @@
     stream_reply_init/4,
     stream_reply_body/3,
     %% S5 (M-2): Shared conversion helper
-    to_binary/1
+    to_binary/1,
+    %% S6: Header injection defense
+    sanitize_header_value/1
 ]).
 
 -define(JSON_CONTENT_TYPE, <<"application/json; charset=utf-8">>).
@@ -24,7 +34,7 @@
     cowboy_req:req().
 json_reply(StatusCode, Data, Req, Opts) ->
     Headers0 = compat_headers(Opts),
-    Headers = Headers0#{<<"content-type">> => ?JSON_CONTENT_TYPE},
+    Headers = sanitize_headers(Headers0#{<<"content-type">> => ?JSON_CONTENT_TYPE}),
     StartUs = maps:get(start_time_us, Opts, erlang:monotonic_time(microsecond)),
     try
         Body = jsx:encode(Data),
@@ -37,7 +47,7 @@ json_reply(StatusCode, Data, Req, Opts) ->
                          [Class, Reason, Stack]),
             RequestId = maps:get(request_id, Opts, <<"unknown">>),
             Fallback = error_payload(500, <<"json_encoding_error">>,
-                format_reason({Class, Reason}), RequestId),
+                <<"Response encoding failed">>, RequestId),
             cowboy_req:reply(500, Headers, jsx:encode(Fallback), Req)
     end.
 
@@ -45,7 +55,7 @@ json_reply(StatusCode, Data, Req, Opts) ->
     cowboy_req:req().
 raw_reply(StatusCode, Body, Req, Opts, ExtraHeaders) ->
     StartUs = maps:get(start_time_us, Opts, erlang:monotonic_time(microsecond)),
-    Headers = maps:merge(compat_headers(Opts), ExtraHeaders),
+    Headers = sanitize_headers(maps:merge(compat_headers(Opts), ExtraHeaders)),
     Req1 = cowboy_req:reply(StatusCode, Headers, Body, Req),
     maybe_log_telemetry(Opts, StatusCode, StartUs),
     Req1.
@@ -83,10 +93,11 @@ reply_error_map(Error, Req) ->
         {ok, Allow} -> Opts0#{allow => Allow};
         error -> Opts0
     end,
-    Opts2 = maybe_put_opt(vclock, Error, Opts1),
-    Opts3 = maybe_put_opt(etag, Error, Opts2),
-    Opts4 = maybe_put_opt(last_modified, Error, Opts3),
-    Opts = maybe_put_opt(link, Error, Opts4),
+    %% Copy optional compat headers from error map into reply opts.
+    Opts = lists:foldl(
+        fun(Key, Acc) -> maybe_put_opt(Key, Error, Acc) end,
+        Opts1,
+        [vclock, etag, last_modified, link]),
     error_reply(Status, Code, Reason, Req, Opts).
 
 -spec error_payload(non_neg_integer(), binary(), term(), binary()) -> map().
@@ -167,7 +178,7 @@ telemetry_tags(Context, Status, DurationUs) ->
 -spec stream_reply_init(non_neg_integer(), cowboy_req:req(), map(), map()) ->
     cowboy_req:req().
 stream_reply_init(StatusCode, Req, Opts, ExtraHeaders) ->
-    Headers = maps:merge(compat_headers(Opts), ExtraHeaders),
+    Headers = sanitize_headers(maps:merge(compat_headers(Opts), ExtraHeaders)),
     cowboy_req:stream_reply(StatusCode, Headers, Req).
 
 %% @doc Send a chunk of data in an active streaming response.
@@ -206,8 +217,28 @@ maybe_put_opt(Key, Source, Target) ->
         error -> Target
     end.
 
+%% @doc Sanitize all header values in a map to prevent HTTP response
+%% header injection (CRLF injection). Strips control characters
+%% (0x00-0x1F, 0x7F) from all binary values. Applied at every Cowboy
+%% response exit point (json_reply, raw_reply, stream_reply_init).
+-spec sanitize_headers(map()) -> map().
+sanitize_headers(Headers) when is_map(Headers) ->
+    maps:map(fun(_K, V) -> sanitize_header_value(V) end, Headers).
+
+%% @doc Strip HTTP-unsafe control characters from a header value.
+%% Removes CR, LF, NUL, and all other C0 control characters (0x00-0x1F)
+%% plus DEL (0x7F). This prevents HTTP response splitting, log injection
+%% via terminal escape sequences, and other control character attacks.
+-spec sanitize_header_value(binary()) -> binary().
+sanitize_header_value(Value) when is_binary(Value) ->
+    << <<C>> || <<C>> <= Value, C >= 16#20, C =/= 16#7F >>;
+sanitize_header_value(Value) ->
+    Value.
+
 format_reason(Bin) when is_binary(Bin) -> Bin;
-format_reason(Term) -> iolist_to_binary(io_lib:format("~p", [Term])).
+format_reason(Term) ->
+    logger:warning("[riak_admin] sanitized internal error reason: ~p", [Term]),
+    <<"Internal server error">>.
 
 %% @doc Convert any Erlang term to a binary safe for JSON/HTTP headers.
 %%

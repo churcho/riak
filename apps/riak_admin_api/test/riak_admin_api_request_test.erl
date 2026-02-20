@@ -157,8 +157,8 @@ normalize_query_alias_equivalence_test() ->
         key => undefined
     },
 
-    ?assertEqual(Canonical#{bucket_type => <<"default">>}, pick_query_canonical(BucketsReq)),
-    ?assertEqual(Canonical, pick_query_canonical(TypesReq)).
+    ?assertEqual(Canonical#{bucket_type => <<"default">>}, pick_canonical(BucketsReq)),
+    ?assertEqual(Canonical, pick_canonical(TypesReq)).
 
 normalize_mapred_path_and_stream_mode_test() ->
     {ok, Req} = riak_admin_api_request:normalize_path(
@@ -377,6 +377,37 @@ request_id_generated_when_missing_test() ->
     ?assert(is_binary(RequestId)),
     ?assert(byte_size(RequestId) > 8).
 
+request_id_strips_crlf_test() ->
+    {ok, Headers} = riak_admin_api_request:normalize_headers(
+        #{<<"x-request-id">> => <<"rid\r\nX-Injected: evil">>}),
+    RequestId = maps:get(request_id, Headers),
+    ?assertEqual(nomatch, binary:match(RequestId, <<"\r">>)),
+    ?assertEqual(nomatch, binary:match(RequestId, <<"\n">>)),
+    ?assertEqual(<<"ridX-Injected: evil">>, RequestId).
+
+request_id_strips_null_byte_test() ->
+    {ok, Headers} = riak_admin_api_request:normalize_headers(
+        #{<<"x-request-id">> => <<"rid\0injected">>}),
+    ?assertEqual(<<"ridinjected">>, maps:get(request_id, Headers)).
+
+request_id_strips_escape_sequence_test() ->
+    {ok, Headers} = riak_admin_api_request:normalize_headers(
+        #{<<"x-request-id">> => <<"rid\e[31m-red">>}),
+    RequestId = maps:get(request_id, Headers),
+    ?assertEqual(nomatch, binary:match(RequestId, <<"\e">>)),
+    ?assertEqual(<<"rid[31m-red">>, RequestId).
+
+request_id_strips_vertical_tab_form_feed_del_test() ->
+    {ok, Headers} = riak_admin_api_request:normalize_headers(
+        #{<<"x-request-id">> => <<"a\x0Bb\x0Cc\x7Fd">>}),
+    ?assertEqual(<<"abcd">>, maps:get(request_id, Headers)).
+
+request_id_preserves_printable_ascii_test() ->
+    Id = <<"req-123_ABC.test/foo@bar:8080">>,
+    {ok, Headers} = riak_admin_api_request:normalize_headers(
+        #{<<"x-request-id">> => Id}),
+    ?assertEqual(Id, maps:get(request_id, Headers)).
+
 security_hook_denies_test() ->
     Context = #{op => object_item},
     Opts = #{authz_fun => fun(_Ctx) -> {deny, 403, <<"forbidden">>, <<"blocked">>} end},
@@ -384,6 +415,28 @@ security_hook_denies_test() ->
     ?assertEqual(403, maps:get(status, Err)),
     ?assertEqual(<<"forbidden">>, maps:get(code, Err)),
     ?assertEqual(<<"blocked">>, maps:get(reason, Err)).
+
+security_hook_invalid_mfa_returns_error_test() ->
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{
+        require_auth => true,
+        authn_fun => {erlang, definitely_missing_authn_fun},
+        authz_fun => fun(_Ctx) -> ok end
+    },
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(500, maps:get(status, Err)),
+    ?assertEqual(<<"security_hook_error">>, maps:get(code, Err)).
+
+security_hook_exception_returns_error_test() ->
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{
+        require_auth => true,
+        authn_fun => fun(_Ctx) -> erlang:error(simulated_crash) end,
+        authz_fun => fun(_Ctx) -> ok end
+    },
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(500, maps:get(status, Err)),
+    ?assertEqual(<<"security_hook_error">>, maps:get(code, Err)).
 
 normalize_cutover_disabled_mode_blocks_endpoint_group_test() ->
     Req0 = #{
@@ -498,14 +551,6 @@ pick_index_canonical(Context) ->
         field => maps:get(field, Context),
         range => maps:get(range, Context),
         extras => maps:get(extras, Context)
-    }.
-
-pick_query_canonical(Context) ->
-    #{
-        op => maps:get(op, Context),
-        bucket_type => maps:get(bucket_type, Context),
-        bucket => maps:get(bucket, Context),
-        key => maps:get(key, Context)
     }.
 
 %%% ============================================================
@@ -702,20 +747,13 @@ auth_guardrail_true_both_hooks_passes_test() ->
 
 auth_guardrail_respects_app_env_test() ->
     %% Test that the app env is respected when opts don't contain require_auth.
-    OldVal = application:get_env(riak_admin_api, security_require_auth),
-    application:set_env(riak_admin_api, security_require_auth, true),
-    try
+    riak_admin_api_test_helpers:with_app_env(security_require_auth, true, fun() ->
         Context = #{method => <<"GET">>, headers => #{}},
         Opts = #{},  %% No require_auth in opts — should read from env
         {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
         ?assertEqual(503, maps:get(status, Err)),
         ?assertEqual(<<"auth_not_configured">>, maps:get(code, Err))
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, security_require_auth);
-            {ok, V} -> application:set_env(riak_admin_api, security_require_auth, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S2 (CG-008): /riak counters alias explicitly rejected

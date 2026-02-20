@@ -1,4 +1,12 @@
-%% @doc Shared Cowboy request normalization and security hooks.
+%% @doc Cowboy request normalization and security enforcement.
+%%
+%% Transforms raw Cowboy requests into a normalized context map through a
+%% pipeline of: header normalization → query parsing → path routing →
+%% query allowlist → method validation → cutover control → security checks.
+%%
+%% Each stage returns `ok | {error, Map}', enabling early exit on the first
+%% failure. The resulting context map drives dispatch in
+%% riak_admin_api_handler.
 
 -module(riak_admin_api_request).
 
@@ -14,6 +22,9 @@
 
 -define(DEFAULT_BUCKET_TYPE, <<"default">>).
 
+%% @doc Normalize a raw Cowboy request into a context map.
+%% Runs headers, query, path, and security checks in sequence;
+%% short-circuits on the first error.
 -spec normalize(cowboy_req:req(), map()) ->
     {ok, request_context(), cowboy_req:req()} |
     {error, map(), cowboy_req:req()}.
@@ -23,51 +34,49 @@ normalize(Req0, Opts) ->
     Headers0 = request_headers(Req0),
     Query0 = request_query(Req0),
     case normalize_headers(Headers0) of
-        {error, Err0} ->
-            {error, Err0, Req0};
+        {error, Err} ->
+            {error, Err, Req0};
         {ok, HeaderMeta} ->
             RequestId = maps:get(request_id, HeaderMeta),
             Headers = maps:remove(request_id, HeaderMeta),
-            case normalize_query(Query0) of
-                {error, Err1} ->
-                    {error, with_request_id(Err1, RequestId), Req0};
-                {ok, Query} ->
-                    case normalize_path(Method, Path, Query) of
-                        {error, Err2} ->
-                            {error, with_request_id(Err2, RequestId), Req0};
-                        {ok, PathCtx} ->
-                            Context0 = PathCtx#{
-                                method => Method,
-                                route => Path,
-                                query => Query,
-                                headers => Headers,
-                                request_id => RequestId
-                            },
-                            case ensure_allowed_query(Context0) of
-                                ok ->
-                                    case ensure_allowed_method(Method, Context0) of
-                                        ok ->
-                                            case ensure_cutover(Context0, Opts) of
-                                                ok ->
-                                                    case ensure_security(Context0, Opts) of
-                                                        ok ->
-                                                            {ok, Context0, Req0};
-                                                        {error, Err3} ->
-                                                            {error, with_request_id(Err3, RequestId), Req0}
-                                                    end;
-                                                {error, Err6} ->
-                                                    {error, with_request_id(Err6, RequestId), Req0}
-                                            end;
-                                        {error, Err4} ->
-                                            {error, with_request_id(Err4, RequestId), Req0}
-                                    end;
-                                {error, Err5} ->
-                                    {error, with_request_id(Err5, RequestId), Req0}
-                            end
-                    end
+            build_context(Req0, Opts, Method, Path, Query0, Headers, RequestId)
+    end.
+
+build_context(Req, Opts, Method, Path, Query0, Headers, RequestId) ->
+    case normalize_query(Query0) of
+        {error, Err} ->
+            {error, with_request_id(Err, RequestId), Req};
+        {ok, Query} ->
+            case normalize_path(Method, Path, Query) of
+                {error, Err} ->
+                    {error, with_request_id(Err, RequestId), Req};
+                {ok, PathCtx} ->
+                    Context = PathCtx#{
+                        method => Method,
+                        route => Path,
+                        query => Query,
+                        headers => Headers,
+                        request_id => RequestId
+                    },
+                    validate_context(Req, Opts, Context, RequestId)
             end
     end.
 
+validate_context(Req, Opts, Context, RequestId) ->
+    Method = maps:get(method, Context),
+    case run_checks([
+        fun() -> ensure_allowed_query(Context) end,
+        fun() -> ensure_allowed_method(Method, Context) end,
+        fun() -> ensure_cutover(Context, Opts) end,
+        fun() -> ensure_security(Context, Opts) end
+    ]) of
+        ok ->
+            {ok, Context, Req};
+        {error, Err} ->
+            {error, with_request_id(Err, RequestId), Req}
+    end.
+
+%% @doc Route a request path to an operation context.
 -spec normalize_path(binary(), binary() | list(), map()) ->
     {ok, request_context()} | {error, map()}.
 normalize_path(Method, Path0, Query) ->
@@ -99,11 +108,12 @@ ensure_stream_mode(Query) ->
         false -> Query#{stream_mode => detect_stream_mode(Query)}
     end.
 
+%% @doc Validate and normalize query string parameters.
 -spec normalize_query(map()) -> {ok, map()} | {error, map()}.
 normalize_query(Query0) when is_map(Query0) ->
     case normalize_query_entries(maps:to_list(Query0), Query0) of
         {ok, Query1} ->
-            StreamMode = detect_stream_mode(Query0),
+            StreamMode = detect_stream_mode(Query1),
             {ok, Query1#{stream_mode => StreamMode}};
         Error ->
             Error
@@ -111,6 +121,7 @@ normalize_query(Query0) when is_map(Query0) ->
 normalize_query(_) ->
     {ok, #{stream_mode => none}}.
 
+%% @doc Normalize request headers: lowercase keys, extract or generate request ID.
 -spec normalize_headers(map()) -> {ok, map()} | {error, map()}.
 normalize_headers(Headers0) when is_map(Headers0) ->
     Headers = maps:from_list([
@@ -120,33 +131,22 @@ normalize_headers(Headers0) when is_map(Headers0) ->
     RequestId = case maps:get(<<"x-request-id">>, Headers, undefined) of
         undefined -> generate_request_id();
         <<>> -> generate_request_id();
-        Value -> Value
+        Value -> sanitize_request_id(Value)
     end,
     {ok, Headers#{request_id => RequestId}};
 normalize_headers(_) ->
     {ok, #{request_id => generate_request_id()}}.
 
+%% @doc Run the full security pipeline: TLS, origin, auth guardrails, authn, authz.
 -spec ensure_security(request_context(), map()) -> ok | {error, map()}.
 ensure_security(Context, Opts) ->
-    case ensure_tls(Context, Opts) of
-        ok ->
-            case ensure_origin(Context, Opts) of
-                ok ->
-                    case ensure_auth_guardrails(Opts) of
-                        ok ->
-                            case run_security_hook(authn_fun, Context, Opts) of
-                                ok -> run_security_hook(authz_fun, Context, Opts);
-                                Error -> Error
-                            end;
-                        Error ->
-                            Error
-                    end;
-                Error ->
-                    Error
-            end;
-        Error ->
-            Error
-    end.
+    run_checks([
+        fun() -> ensure_tls(Context, Opts) end,
+        fun() -> ensure_origin(Context, Opts) end,
+        fun() -> ensure_auth_guardrails(Opts) end,
+        fun() -> run_security_hook(authn_fun, Context, Opts) end,
+        fun() -> run_security_hook(authz_fun, Context, Opts) end
+    ]).
 
 %% @doc Fail-fast guardrail for missing auth hooks in protected deployments.
 %%
@@ -159,8 +159,9 @@ ensure_security(Context, Opts) ->
 %% test and development environments).
 -spec ensure_auth_guardrails(map()) -> ok | {error, map()}.
 ensure_auth_guardrails(Opts) ->
-    RequireAuth = maps:get(require_auth, Opts,
+    RequireAuth0 = maps:get(require_auth, Opts,
         application:get_env(riak_admin_api, security_require_auth, false)),
+    RequireAuth = normalize_bool_config(RequireAuth0),
     case RequireAuth of
         true ->
             HasAuthn = has_valid_hook(authn_fun, Opts),
@@ -188,6 +189,13 @@ ensure_auth_guardrails(Opts) ->
         _ ->
             ok
     end.
+
+%% @doc Normalize a boolean config value that may arrive as atom, binary,
+%% or list string from environment variables or config files.
+normalize_bool_config(true) -> true;
+normalize_bool_config(<<"true">>) -> true;
+normalize_bool_config("true") -> true;
+normalize_bool_config(_) -> false.
 
 has_valid_hook(Key, Opts) ->
     case maps:get(Key, Opts, undefined) of
@@ -657,10 +665,9 @@ normalize_query_value(_, Value) ->
     {ok, Value}.
 
 parse_boolean(Value0) ->
-    Value = string:lowercase(binary_to_list(Value0)),
-    case Value of
-        "true" -> {ok, true};
-        "false" -> {ok, false};
+    case string:lowercase(Value0) of
+        <<"true">> -> {ok, true};
+        <<"false">> -> {ok, false};
         _ -> {error, <<"Boolean query params must be true|false">>}
     end.
 
@@ -675,10 +682,22 @@ parse_quorum(Value) ->
     end.
 
 parse_timeout(Value) ->
+    MaxTimeout = max_server_timeout(),
     case integer_from_binary(Value) of
-        {ok, Int} when Int >= 0 -> {ok, Int};
-        _ -> {error, <<"Invalid timeout value">>}
+        {ok, Int} when Int >= 0, Int =< 4294967295 ->
+            {ok, erlang:min(Int, MaxTimeout)};
+        _ ->
+            {error, <<"Invalid timeout value (must be 0..4294967295)">>}
     end.
+
+%% @doc Maximum server-side timeout (ms) applied to all client-requested
+%% timeouts. Prevents resource exhaustion from requests with absurdly
+%% large timeout values (e.g. timeout=4294967295 ≈ 50 days) that would
+%% hold Cowboy handler processes and Riak vnodes indefinitely.
+%% Default: 300000 ms (5 minutes). Configurable via application env.
+-spec max_server_timeout() -> pos_integer().
+max_server_timeout() ->
+    application:get_env(riak_admin_api, max_server_timeout_ms, 300000).
 
 parse_max_results(Value) ->
     case integer_from_binary(Value) of
@@ -785,17 +804,30 @@ is_safe_method(<<"OPTIONS">>) -> true;
 is_safe_method(_) -> false.
 
 run_security_hook(Key, Context, Opts) ->
+    try normalize_hook_result(invoke_security_hook(Key, Context, Opts))
+    catch
+        Class:Reason:Stack ->
+            logger:error("[riak_admin] security hook ~p crashed: ~p:~p~n~p",
+                         [Key, Class, Reason, Stack]),
+            {error, #{
+                status => 500,
+                code => <<"security_hook_error">>,
+                reason => <<"Security hook execution failed">>
+            }}
+    end.
+
+invoke_security_hook(Key, Context, Opts) ->
     case maps:get(Key, Opts, undefined) of
         undefined ->
             ok;
         Fun when is_function(Fun, 1) ->
-            normalize_hook_result(Fun(Context));
+            Fun(Context);
         Fun when is_function(Fun, 2) ->
-            normalize_hook_result(Fun(Context, Opts));
+            Fun(Context, Opts);
         {M, F} when is_atom(M), is_atom(F) ->
-            normalize_hook_result(M:F(Context));
+            M:F(Context);
         {M, F, 2} when is_atom(M), is_atom(F) ->
-            normalize_hook_result(M:F(Context, Opts));
+            M:F(Context, Opts);
         _ ->
             {error, #{
                 status => 500,
@@ -832,6 +864,15 @@ normalize_hook_result(_) ->
         code => <<"security_hook_error">>,
         reason => <<"Security hook returned an unsupported value">>
     }}.
+
+%% @doc Run a list of check functions in order. Each must return
+%% `ok' or `{error, Reason}'. Short-circuits on the first error.
+run_checks([]) -> ok;
+run_checks([Check | Rest]) ->
+    case Check() of
+        ok -> run_checks(Rest);
+        {error, _} = Err -> Err
+    end.
 
 request_method(#{method := Method}) -> to_binary(Method);
 request_method(Req) -> to_binary(cowboy_req:method(Req)).
@@ -912,7 +953,7 @@ alias_version(types) -> 3;
 alias_version(mapred) -> 2.
 
 header_name(Key) when is_binary(Key) ->
-    list_to_binary(string:lowercase(binary_to_list(Key)));
+    iolist_to_binary(string:lowercase(Key));
 header_name(Key) when is_atom(Key) ->
     header_name(atom_to_binary(Key, utf8));
 header_name(Key) when is_list(Key) ->
@@ -927,6 +968,17 @@ integer_from_binary(Value) ->
 generate_request_id() ->
     I = integer_to_binary(erlang:unique_integer([positive, monotonic])),
     <<"riak-admin-", I/binary>>.
+
+%% @doc Sanitize a client-supplied request ID to prevent HTTP response
+%% header injection. Strips all control characters (0x00-0x1F, 0x7F)
+%% to prevent CRLF injection, terminal escape sequences, and log
+%% poisoning. Truncates to 200 bytes before filtering.
+sanitize_request_id(Value) when is_binary(Value) ->
+    Truncated = case byte_size(Value) > 200 of
+        true -> binary:part(Value, 0, 200);
+        false -> Value
+    end,
+    << <<C>> || <<C>> <= Truncated, C >= 16#20, C =/= 16#7F >>.
 
 with_request_id(Error0, RequestId) ->
     Error = case maps:is_key(reason, Error0) of

@@ -153,11 +153,79 @@ cors_headers_merged_into_compat_headers_test() ->
     ?assertEqual(<<"https://admin.example.com">>,
         maps:get(<<"access-control-allow-origin">>, Headers)).
 
+%%% ============================================================
+%%% S6: Header injection defense — sanitize_header_value/1
+%%% ============================================================
+
+sanitize_header_value_strips_crlf_test() ->
+    ?assertEqual(<<"foobar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\r\nbar">>)).
+
+sanitize_header_value_strips_null_byte_test() ->
+    ?assertEqual(<<"foobar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\0bar">>)).
+
+sanitize_header_value_strips_esc_sequence_test() ->
+    %% ESC (0x1B) used in terminal escape sequences
+    ?assertEqual(<<"foo[31mbar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\e[31mbar">>)).
+
+sanitize_header_value_strips_vertical_tab_and_form_feed_test() ->
+    ?assertEqual(<<"foobar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\x0B\x0Cbar">>)).
+
+sanitize_header_value_strips_del_test() ->
+    ?assertEqual(<<"foobar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\x7Fbar">>)).
+
+sanitize_header_value_preserves_printable_ascii_test() ->
+    Printable = <<"abcABC 012!@#$%^&*()~`[]{}<>:;'/?,.-_+=|\\\"">>,
+    ?assertEqual(Printable,
+        riak_admin_api_response:sanitize_header_value(Printable)).
+
+sanitize_header_value_strips_tab_preserves_space_test() ->
+    %% Tab (0x09) is stripped — it's below 0x20.
+    ?assertEqual(<<"foobar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo\tbar">>)),
+    %% Space (0x20) is preserved.
+    ?assertEqual(<<"foo bar">>,
+        riak_admin_api_response:sanitize_header_value(<<"foo bar">>)).
+
+sanitize_header_value_passthrough_non_binary_test() ->
+    ?assertEqual(42, riak_admin_api_response:sanitize_header_value(42)),
+    ?assertEqual(ok, riak_admin_api_response:sanitize_header_value(ok)).
+
+sanitize_header_value_strips_full_http_response_splitting_payload_test() ->
+    %% Classic HTTP response splitting: inject CRLF + second response
+    Payload = <<"valid-id\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>evil</h1>">>,
+    Sanitized = riak_admin_api_response:sanitize_header_value(Payload),
+    ?assertEqual(nomatch, binary:match(Sanitized, <<"\r">>)),
+    ?assertEqual(nomatch, binary:match(Sanitized, <<"\n">>)),
+    %% The printable parts are preserved
+    ?assert(binary:match(Sanitized, <<"valid-id">>) =/= nomatch).
+
+sanitize_headers_applied_to_json_reply_test() ->
+    %% Verify that json_reply sanitizes header values containing CRLF
+    Req0 = #{pid => self(), streamid => 2001},
+    _Req1 = riak_admin_api_response:json_reply(
+        200, #{ok => true}, Req0,
+        #{request_id => <<"rid-\r\n-injected">>}),
+    {_Status, Headers, _Body} = receive_response_for_stream(2001),
+    ReqId = maps:get(<<"x-request-id">>, Headers),
+    ?assertEqual(nomatch, binary:match(ReqId, <<"\r">>)),
+    ?assertEqual(nomatch, binary:match(ReqId, <<"\n">>)).
+
+sanitize_headers_applied_to_raw_reply_test() ->
+    %% Verify that raw_reply sanitizes extra headers containing CRLF
+    Req0 = #{pid => self(), streamid => 2002},
+    _Req1 = riak_admin_api_response:raw_reply(
+        200, <<"body">>, Req0,
+        #{request_id => <<"rid-ok">>},
+        #{<<"location">> => <<"/buckets/evil\r\nX-Injected: yes/keys/k">>}),
+    {_Status, Headers, _Body} = receive_response_for_stream(2002),
+    Location = maps:get(<<"location">>, Headers),
+    ?assertEqual(nomatch, binary:match(Location, <<"\r">>)),
+    ?assertEqual(nomatch, binary:match(Location, <<"\n">>)).
+
 receive_response_for_stream(StreamID) ->
-    Pid = self(),
-    receive
-        {{Pid, StreamID}, {response, Status, Headers, Body}} ->
-            {Status, Headers, Body}
-    after 500 ->
-        ?assert(false)
-    end.
+    riak_admin_api_test_helpers:receive_response_for_stream(StreamID).
