@@ -275,10 +275,10 @@ admin_routes() ->
         {"/api/ring/ownership",    rah_ring, []},
         {"/api/nodes/:node/stats", rah_nodes, []},
         {"/api/handoff/status",    rah_handoff, []},
-        {"/api/aae/status",        rah_aae, []}
+        {"/api/aae/status",        rah_aae, []},
         %% M7: {"/api/kv/:type/:bucket/:key",     rah_kv, []}
         %% M7: {"/api/bucket-types",              rah_bucket_types, []}
-        %% M8: {"/api/stream/events",             rah_events_ws, []}
+        {"/api/stream/events",             rah_events_ws, []}
     ].
 
 -spec substrate_routes() -> [cowboy_router:route_path()].
