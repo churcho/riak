@@ -11,7 +11,7 @@
 %%% - Subscribe: {"action": "subscribe", "topics": ["ring", ...]}
 %%% - Unsubscribe: {"action": "unsubscribe", "topics": ["ring"]}
 %%% - Ping: {"action": "ping"}
-%%% - Events arrive as: {"type": "event", "topic": ..., "data": ...}
+%%% - Events arrive as pre-encoded JSON: {"type":"event","topic":...,"data":...}
 %%% @end
 %%%-------------------------------------------------------------------
 -module(rah_events_ws).
@@ -44,7 +44,8 @@ init(Req, Opts) ->
                 idle_timeout => IdleTimeout,
                 max_frame_size => MaxFrameSize
             },
-            {cowboy_websocket, Req, #{subscriptions => []}, WsOpts};
+            {cowboy_websocket, Req,
+             #{subscriptions => [], last_subscribe_ts => undefined}, WsOpts};
         {error, ErrorMap} ->
             Req1 = riak_admin_api_response:reply_error_map(ErrorMap, Req),
             {ok, Req1, Opts}
@@ -55,11 +56,12 @@ init(Req, Opts) ->
 -spec websocket_init(map()) ->
     {[{text, binary()}], map()}.
 websocket_init(State) ->
-    join_events_group(),
+    Live = join_events_group(),
     ConnectedFrame = jsx:encode(#{
         type => <<"connected">>,
         node => node(),
         topics => riak_admin_api_event_bridge:available_topics(),
+        live => Live,
         timestamp => erlang:system_time(second)
     }),
     {[{text, ConnectedFrame}], State}.
@@ -70,7 +72,16 @@ websocket_init(State) ->
 websocket_handle({text, Raw}, State) ->
     case parse_message(Raw) of
         {ok, Parsed} ->
-            dispatch_action(Parsed, State);
+            try dispatch_action(Parsed, State)
+            catch Class:Err:Stack ->
+                logger:warning("[riak_admin] WS dispatch crashed: ~p:~p",
+                               [Class, Err]),
+                logger:debug("[riak_admin] WS dispatch stacktrace: ~p",
+                             [Stack]),
+                Frame = error_frame(<<"internal_error">>,
+                                    <<"Server error processing message">>),
+                {[{text, Frame}], State}
+            end;
         {error, Reason} ->
             Frame = error_frame(<<"invalid_message">>, Reason),
             {[{text, Frame}], State}
@@ -80,37 +91,30 @@ websocket_handle(_Other, State) ->
 
 %% @doc Handle Erlang messages (syn events, etc).
 %%
-%% Only accepts events from the local node's bridge. On a multi-node
-%% cluster, each node runs its own bridge, and syn distributes events
-%% across all nodes. Without this filter, a WS handler would receive
-%% N copies of every event (one from each node's bridge).
+%% Events arrive as pre-encoded JSON binaries from the local bridge
+%% via syn:local_publish. The handler only needs to check the topic
+%% against its subscription list and forward the binary — no JSON
+%% encoding per subscriber.
 %%
 %% Includes backpressure: if the message queue exceeds the configured
 %% limit, the event is dropped and a warning frame is sent instead.
 -spec websocket_info(term(), map()) ->
     {[{text, binary()}], map()} | {ok, map()}.
-websocket_info({event, Node, {Topic, Data}},
+websocket_info({event_frame, Topic, Frame},
                #{subscriptions := Subs} = State) ->
-    case Node =:= node() andalso lists:member(Topic, Subs) of
+    case lists:member(Topic, Subs) of
         true ->
             case check_backpressure() of
                 ok ->
-                    Frame = jsx:encode(#{
-                        type => <<"event">>,
-                        topic => Topic,
-                        node => Node,
-                        data => Data,
-                        timestamp => erlang:system_time(second)
-                    }),
                     {[{text, Frame}], State};
                 {backpressure, QueueLen} ->
-                    Frame = jsx:encode(#{
+                    BpFrame = jsx:encode(#{
                         type => <<"backpressure">>,
                         message_queue_len => QueueLen,
                         dropped_topic => Topic,
                         timestamp => erlang:system_time(second)
                     }),
-                    {[{text, Frame}], State}
+                    {[{text, BpFrame}], State}
             end;
         false ->
             {ok, State}
@@ -130,20 +134,32 @@ terminate(_Reason, _Req, _State) ->
 dispatch_action(#{<<"action">> := <<"subscribe">>,
                   <<"topics">> := Topics}, State)
   when is_list(Topics) ->
-    ValidTopics = riak_admin_api_event_bridge:available_topics(),
-    Requested = [T || T <- Topics, is_binary(T),
-                      lists:member(T, ValidTopics)],
-    #{subscriptions := Current} = State,
-    NewSubs = lists:usort(Current ++ Requested),
-    State1 = State#{subscriptions := NewSubs},
-    AckFrame = jsx:encode(#{type => <<"subscribed">>,
-                            topics => Requested}),
-    %% Only send snapshots for topics that are genuinely new.
-    %% Re-subscribing to an already-active topic is idempotent
-    %% but should not trigger a redundant snapshot delivery.
-    NewTopics = Requested -- Current,
-    SnapshotFrames = snapshot_frames(NewTopics),
-    {[{text, AckFrame} | SnapshotFrames], State1};
+    Now = erlang:monotonic_time(millisecond),
+    MinInterval = application:get_env(
+        riak_admin_api, ws_subscribe_min_interval, 1000),
+    LastTs = maps:get(last_subscribe_ts, State, undefined),
+    case LastTs =:= undefined orelse Now - LastTs >= MinInterval of
+        false ->
+            Frame = error_frame(<<"rate_limited">>,
+                                <<"Subscribe too frequent, try again shortly">>),
+            {[{text, Frame}], State};
+        true ->
+            ValidTopics = riak_admin_api_event_bridge:available_topics(),
+            Requested = [T || T <- Topics, is_binary(T),
+                              lists:member(T, ValidTopics)],
+            #{subscriptions := Current} = State,
+            NewSubs = lists:usort(Current ++ Requested),
+            State1 = State#{subscriptions := NewSubs,
+                            last_subscribe_ts => Now},
+            AckFrame = jsx:encode(#{type => <<"subscribed">>,
+                                    topics => Requested}),
+            %% Only send snapshots for topics that are genuinely new.
+            %% Re-subscribing to an already-active topic is idempotent
+            %% but should not trigger a redundant snapshot delivery.
+            NewTopics = Requested -- Current,
+            SnapshotFrames = snapshot_frames(NewTopics),
+            {[{text, AckFrame} | SnapshotFrames], State1}
+    end;
 
 dispatch_action(#{<<"action">> := <<"unsubscribe">>,
                   <<"topics">> := Topics}, State)
@@ -243,15 +259,17 @@ join_events_group() ->
     try
         case syn:join(?SCOPE, ?GROUP_EVENTS, self()) of
             ok ->
-                ok;
+                true;
             {error, JoinErr} ->
                 logger:warning("[riak_admin] WS handler failed to join "
-                               "cluster_events: ~p", [JoinErr])
+                               "cluster_events: ~p", [JoinErr]),
+                false
         end
     catch
         _:Err ->
             logger:warning("[riak_admin] WS handler could not join "
-                           "cluster_events: ~p", [Err])
+                           "cluster_events: ~p", [Err]),
+            false
     end.
 
 parse_message(Raw) ->
@@ -305,7 +323,7 @@ dispatch_subscribe_test_() ->
     {"subscribe adds valid topics to state", [
         {"valid topics get added",
          fun() ->
-             State = #{subscriptions => []},
+             State = #{subscriptions => [], last_subscribe_ts => undefined},
              Msg = #{<<"action">> => <<"subscribe">>,
                      <<"topics">> => [<<"ring">>, <<"cluster">>]},
              {Frames, State1} = dispatch_action(Msg, State),
@@ -318,7 +336,7 @@ dispatch_subscribe_test_() ->
          end},
         {"invalid topics are filtered out",
          fun() ->
-             State = #{subscriptions => []},
+             State = #{subscriptions => [], last_subscribe_ts => undefined},
              Msg = #{<<"action">> => <<"subscribe">>,
                      <<"topics">> => [<<"ring">>, <<"bogus">>]},
              {_Frames, State1} = dispatch_action(Msg, State),
@@ -326,20 +344,39 @@ dispatch_subscribe_test_() ->
          end},
         {"re-subscribing to already subscribed topic is idempotent",
          fun() ->
-             State = #{subscriptions => [<<"ring">>]},
+             State = #{subscriptions => [<<"ring">>], last_subscribe_ts => undefined},
              Msg = #{<<"action">> => <<"subscribe">>,
                      <<"topics">> => [<<"ring">>, <<"cluster">>]},
              {Frames, State1} = dispatch_action(Msg, State),
-             %% Both topics should be in the subscription list
              ?assertEqual([<<"cluster">>, <<"ring">>],
                           maps:get(subscriptions, State1)),
-             %% Ack frame should list both requested topics
              {text, AckJson} = hd(Frames),
              AckDecoded = jsx:decode(AckJson, [return_maps]),
              ?assertEqual(<<"subscribed">>, maps:get(<<"type">>, AckDecoded)),
              AckTopics = maps:get(<<"topics">>, AckDecoded),
              ?assert(lists:member(<<"ring">>, AckTopics)),
              ?assert(lists:member(<<"cluster">>, AckTopics))
+         end},
+        {"rapid subscribe is rate limited",
+         fun() ->
+             application:set_env(riak_admin_api, ws_subscribe_min_interval, 5000),
+             %% First subscribe succeeds
+             State0 = #{subscriptions => [], last_subscribe_ts => undefined},
+             Msg = #{<<"action">> => <<"subscribe">>,
+                     <<"topics">> => [<<"ring">>]},
+             {_, State1} = dispatch_action(Msg, State0),
+             ?assertEqual([<<"ring">>], maps:get(subscriptions, State1)),
+             %% Immediate second subscribe is rejected
+             Msg2 = #{<<"action">> => <<"subscribe">>,
+                      <<"topics">> => [<<"cluster">>]},
+             {Frames2, State2} = dispatch_action(Msg2, State1),
+             %% Subscriptions unchanged
+             ?assertEqual([<<"ring">>], maps:get(subscriptions, State2)),
+             {text, Json} = hd(Frames2),
+             Decoded = jsx:decode(Json, [return_maps]),
+             ?assertEqual(<<"error">>, maps:get(<<"type">>, Decoded)),
+             ?assertEqual(<<"rate_limited">>, maps:get(<<"code">>, Decoded)),
+             application:unset_env(riak_admin_api, ws_subscribe_min_interval)
          end}
     ]}.
 
@@ -382,26 +419,24 @@ dispatch_unknown_action_test_() ->
      end}.
 
 websocket_info_filters_by_subscription_test_() ->
-    {"websocket_info only sends subscribed local-node topics", [
-        {"subscribed topic from local node generates frame",
+    {"websocket_info forwards pre-encoded frames for subscribed topics", [
+        {"subscribed topic forwards the pre-encoded frame",
          fun() ->
              State = #{subscriptions => [<<"ring">>]},
-             Event = {event, node(), {<<"ring">>, #{test => true}}},
+             Frame = jsx:encode(#{type => <<"event">>, topic => <<"ring">>,
+                                  data => #{test => true}}),
+             Event = {event_frame, <<"ring">>, Frame},
              {Frames, _} = websocket_info(Event, State),
-             ?assertEqual(1, length(Frames))
+             ?assertEqual(1, length(Frames)),
+             %% The frame is forwarded as-is, no re-encoding
+             {text, Received} = hd(Frames),
+             ?assertEqual(Frame, Received)
          end},
         {"unsubscribed topic is dropped",
          fun() ->
              State = #{subscriptions => [<<"ring">>]},
-             Event = {event, node(), {<<"cluster">>, #{test => true}}},
-             Result = websocket_info(Event, State),
-             ?assertEqual({ok, State}, Result)
-         end},
-        {"subscribed topic from remote node is dropped (prevents multi-node duplicates)",
-         fun() ->
-             State = #{subscriptions => [<<"ring">>]},
-             RemoteNode = 'remote@other.host',
-             Event = {event, RemoteNode, {<<"ring">>, #{test => true}}},
+             Frame = jsx:encode(#{type => <<"event">>, topic => <<"cluster">>}),
+             Event = {event_frame, <<"cluster">>, Frame},
              Result = websocket_info(Event, State),
              ?assertEqual({ok, State}, Result)
          end}
@@ -449,6 +484,31 @@ check_security_rejects_when_auth_required_no_hooks_test_() ->
          Result = check_security(Req),
          application:set_env(riak_admin_api, security_require_auth, false),
          ?assertMatch({error, _}, Result)
+     end}.
+
+websocket_handle_catches_dispatch_crash_test_() ->
+    {"websocket_handle returns error frame instead of crashing on dispatch failure",
+     fun() ->
+         %% Force a crash by passing a state that's missing the
+         %% 'subscriptions' key — dispatch_action will crash on
+         %% pattern match #{subscriptions := Current}.
+         Raw = <<"{\"action\":\"subscribe\",\"topics\":[\"ring\"]}">>,
+         BadState = #{last_subscribe_ts => undefined},
+         {Frames, State1} = websocket_handle({text, Raw}, BadState),
+         %% State unchanged — crash was caught
+         ?assertEqual(BadState, State1),
+         {text, Json} = hd(Frames),
+         Decoded = jsx:decode(Json, [return_maps]),
+         ?assertEqual(<<"error">>, maps:get(<<"type">>, Decoded)),
+         ?assertEqual(<<"internal_error">>, maps:get(<<"code">>, Decoded))
+     end}.
+
+join_events_group_returns_boolean_test_() ->
+    {"join_events_group returns false when syn is not running",
+     fun() ->
+         %% syn is not initialized in eunit, so join should fail gracefully
+         Result = join_events_group(),
+         ?assertEqual(false, Result)
      end}.
 
 -endif.

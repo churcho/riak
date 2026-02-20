@@ -4,8 +4,7 @@
 %%%
 %%% Owns the syn registration for this node. On startup, registers
 %%% in the `riak_admin' scope with metadata (DC name, ports, version).
-%%% Joins the `api_nodes' group for discovery and `cluster_events'
-%%% group for push notifications.
+%%% Joins the `api_nodes' group for discovery.
 %%%
 %%% If this process crashes, syn automatically unregisters it.
 %%% The supervisor restarts it and it re-registers with a

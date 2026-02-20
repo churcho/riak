@@ -4,9 +4,9 @@
 %%%
 %%% Subscribes to riak_core_ring_events and
 %%% riak_core_node_watcher_events (push-based), and runs timers for
-%%% poll-based data (node_stats, handoff, AAE). Publishes normalized
-%%% events through the existing syn cluster_events group so that all
-%%% WebSocket handlers and the coordinator receive them.
+%%% poll-based data (node_stats, handoff, AAE). Publishes pre-encoded
+%%% JSON frames through the local syn cluster_events group so that
+%%% WebSocket handlers can forward them without per-subscriber encoding.
 %%%
 %%% The bridge is the single source of truth for the latest snapshot
 %%% of each topic. WebSocket handlers call get_snapshot/1 when a
@@ -326,10 +326,24 @@ maybe_publish_changed(Topic, Data, #{snapshots := Snaps} = State) ->
             publish_and_store(Topic, Data, State)
     end.
 
+%% @private Encode the event frame once and publish the pre-encoded
+%% binary to local group members. WS handlers forward the binary
+%% directly — no per-subscriber JSON encoding.
+%%
+%% Message format: {event_frame, Topic, EncodedBinary}
+%%   Topic  — binary, used by WS handlers for subscription filtering
+%%   Binary — complete JSON frame ready for the WebSocket wire
 publish_event(Topic, Data) ->
     try
+        Frame = jsx:encode(#{
+            type => <<"event">>,
+            topic => Topic,
+            node => node(),
+            data => Data,
+            timestamp => erlang:system_time(second)
+        }),
         case syn:local_publish(?SCOPE, ?GROUP_EVENTS,
-                               {event, node(), {Topic, Data}}) of
+                               {event_frame, Topic, Frame}) of
             {ok, _RecipientCount} ->
                 ok;
             {error, Reason} ->
