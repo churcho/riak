@@ -105,12 +105,18 @@ handle_info(poll_node_stats, State) ->
     State1 = maybe_start_stats_collection(State),
     schedule_poll(poll_node_stats, bridge_stats_interval()),
     {noreply, State1};
-handle_info({stats_collected, {ok, StatsData}}, State) ->
+handle_info({stats_collected, Gen, {ok, StatsData}},
+            #{stats_gen := Gen} = State) ->
     State1 = State#{stats_collecting := false},
     State2 = maybe_publish_changed(<<"node_stats">>, StatsData, State1),
     {noreply, State2};
-handle_info({stats_collected, {error, _}}, State) ->
+handle_info({stats_collected, Gen, {error, _}},
+            #{stats_gen := Gen} = State) ->
     {noreply, State#{stats_collecting := false}};
+handle_info({stats_collected, _StaleGen, _}, State) ->
+    %% Result from a timed-out generation — discard to avoid
+    %% overwriting fresher data from the current generation.
+    {noreply, State};
 handle_info(poll_handoff, State) ->
     State1 = handle_poll_handoff(State),
     schedule_poll(poll_handoff, bridge_handoff_interval()),
@@ -182,14 +188,16 @@ maybe_start_stats_collection(#{stats_collecting := true} = State) ->
     State;
 maybe_start_stats_collection(State) ->
     Bridge = self(),
+    Gen = maps:get(stats_gen, State, 0) + 1,
     spawn(fun() ->
         Result = collect_all_node_stats(),
-        Bridge ! {stats_collected, Result}
+        Bridge ! {stats_collected, Gen, Result}
     end),
     %% Safety: reset flag if worker dies without sending result.
     %% Generation counter ensures stale timeouts from previous
     %% collection cycles don't reset the flag for the current one.
-    Gen = maps:get(stats_gen, State, 0) + 1,
+    %% The same counter is sent with the result so late arrivals
+    %% from timed-out generations are discarded.
     erlang:send_after(bridge_stats_interval() * 2, self(),
                       {stats_collection_timeout, Gen}),
     State#{stats_collecting := true, stats_gen => Gen}.
@@ -617,10 +625,10 @@ maybe_start_stats_collection_sets_flag_test_() ->
          State1 = maybe_start_stats_collection(State),
          ?assertEqual(true, maps:get(stats_collecting, State1)),
          %% The spawned process will try collect_all_node_stats which
-         %% will fail (no riak_core), send us {stats_collected, {error, _}},
+         %% will fail (no riak_core), send us {stats_collected, Gen, {error, _}},
          %% and exit. Drain the message so it doesn't leak into other tests.
          receive
-             {stats_collected, _} -> ok
+             {stats_collected, _, _} -> ok
          after 2000 ->
              ok
          end
