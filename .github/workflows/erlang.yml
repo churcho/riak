@@ -6,7 +6,7 @@ on:
       - openriak-4.0
   pull_request:
     branches:
-      - openriak-4,0
+      - openriak-4.0
 
 jobs:
 
