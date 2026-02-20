@@ -1149,7 +1149,8 @@ list_buckets_reply(BucketType, Timeout0, Client) ->
             {error, bucket_error_map(Reason)}
     end.
 
-stream_buckets_reply(BucketType, Timeout, Client) ->
+stream_buckets_reply(BucketType, Timeout0, Client) ->
+    Timeout = cap_timeout(Timeout0, stream_collection_ceiling()),
     case riak_client:stream_list_buckets(none, Timeout, BucketType, Client) of
         {ok, ReqId} ->
             case stream_incremental_enabled() of
@@ -1312,13 +1313,13 @@ list_keys_error_mode() ->
     end.
 
 stream_keys_reply(Bucket, Timeout0, BucketPropsJson, Context, Client) ->
-    case riak_client:stream_list_keys(Bucket, Timeout0, Client) of
+    Timeout = key_stream_timeout(Timeout0),
+    case riak_client:stream_list_keys(Bucket, Timeout, Client) of
         {ok, ReqId} ->
             FirstChunk = case maps:get(api_version, Context, 2) of
                 1 -> mochijson2:encode({struct, BucketPropsJson});
                 _ -> <<>>
             end,
-            Timeout = key_stream_timeout(Timeout0),
             case stream_incremental_enabled() of
                 true ->
                     %% S2 (CG-001): True incremental streaming
@@ -1351,6 +1352,13 @@ key_stream_timeout(infinity) ->
     stream_collection_ceiling();
 key_stream_timeout(Timeout) when is_integer(Timeout), Timeout >= 0 ->
     Timeout;
+key_stream_timeout(Timeout) when is_binary(Timeout) ->
+    try binary_to_integer(Timeout) of
+        IntTimeout when IntTimeout >= 0 -> IntTimeout;
+        _ -> ?DEFAULT_KEY_STREAM_TIMEOUT
+    catch
+        error:badarg -> ?DEFAULT_KEY_STREAM_TIMEOUT
+    end;
 key_stream_timeout(_) ->
     ?DEFAULT_KEY_STREAM_TIMEOUT.
 
