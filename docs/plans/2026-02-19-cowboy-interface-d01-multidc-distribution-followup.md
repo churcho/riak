@@ -2,7 +2,7 @@
 
 Track ID: D01
 Branch: `feature/cowboy-d01-multidc-distribution`
-Status: Deferred (start only after B08)
+Status: Executed (2026-02-20 D01 baseline + critical pass)
 Depends on: B08 completion and stable Cowboy parity rollout
 
 ## Why this is deferred
@@ -78,6 +78,25 @@ Decision:
 3. What are the required consistency guarantees per endpoint class?
 4. Should forwarding be transparent or explicit via new API options/headers?
 5. Do we need separate syn scopes for different subsystem concerns?
+
+## D01 execution update (2026-02-20)
+
+This D01 pass resolved the kickoff questions into a concrete baseline:
+
+- Endpoint routing policy is now explicitly categorized as `local_only`, `local_first`, `remote_forward`, and `aggregate_read`.
+- Partial-DC failures use explicit response contracts (`partial=true` for aggregate success with unavailable members; `503` only when no usable DC response).
+- Write consistency remains single-target/local by default; no transparent multi-DC write fanout in D01 baseline.
+- Forwarding remains explicit and policy-controlled; no hidden transparent forwarding default.
+- syn evolution uses additive metadata versioning (`syn_meta_vsn`) rather than introducing a separate scope in this pass.
+
+Artifacts produced:
+
+1. `docs/plans/artifacts/d01-multidc-routing-adr.md`
+2. `docs/plans/artifacts/d01-distribution-behavior-matrix.md`
+3. `docs/plans/artifacts/d01-syn-metadata-evolution.md`
+4. `docs/plans/artifacts/d01-multidc-test-and-rollout.md`
+5. `docs/plans/artifacts/cowboy-critical-gaps-register.md`
+6. `docs/plans/artifacts/cowboy-critical-remediation-notes.md`
 
 ## New-agent restart protocol for D01
 

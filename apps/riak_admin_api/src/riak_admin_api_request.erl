@@ -481,17 +481,36 @@ ensure_cutover(Context, Opts) ->
                 reason => iolist_to_binary(io_lib:format(
                     "Endpoint group ~p has been removed", [Op]))
             }};
+        {invalid_op_mode, InvalidMode} ->
+            {error, #{
+                status => 503,
+                code => <<"route_cutover_misconfigured">>,
+                reason => iolist_to_binary(io_lib:format(
+                    "Endpoint group ~p has invalid cutover mode ~ts in cowboy_cutover_op_modes",
+                    [Op, to_binary(InvalidMode)]))
+            }};
         _ ->
             ok
     end.
 
 resolve_cutover_mode(Op, Opts) ->
-    DefaultMode = normalize_cutover_mode(
+    DefaultMode = resolve_default_cutover_mode(
         maps:get(cutover_default_mode, Opts, enabled)),
     Modes = maps:get(cutover_op_modes, Opts, []),
     case lookup_cutover_mode(Op, Modes) of
-        undefined -> DefaultMode;
-        Mode -> normalize_cutover_mode(Mode)
+        undefined ->
+            DefaultMode;
+        Mode ->
+            case normalize_cutover_mode(Mode) of
+                invalid -> {invalid_op_mode, Mode};
+                Normalized -> Normalized
+            end
+    end.
+
+resolve_default_cutover_mode(Mode) ->
+    case normalize_cutover_mode(Mode) of
+        invalid -> enabled;
+        Normalized -> Normalized
     end.
 
 lookup_cutover_mode(Op, Modes) when is_map(Modes) ->
@@ -532,7 +551,7 @@ normalize_cutover_mode("disabled") -> disabled;
 normalize_cutover_mode("removed") -> removed;
 normalize_cutover_mode("deprecated") -> deprecated;
 normalize_cutover_mode("shadow") -> shadow;
-normalize_cutover_mode(_) -> enabled.
+normalize_cutover_mode(_) -> invalid.
 
 normalize_query_entries([], Acc) ->
     {ok, Acc};

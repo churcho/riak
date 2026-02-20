@@ -67,6 +67,15 @@ telemetry_tags_include_route_and_status_test() ->
     ?assertEqual(503, maps:get(status, Tags)),
     ?assertEqual(1142, maps:get(duration_us, Tags)).
 
+telemetry_tags_include_error_code_dimension_test() ->
+    Context = #{
+        route => <<"/mapred">>,
+        op => mapred,
+        error_code => <<"timeout">>
+    },
+    Tags = riak_admin_api_response:telemetry_tags(Context, 500, 77),
+    ?assertEqual(<<"timeout">>, maps:get(error_code, Tags)).
+
 receive_response_for_stream(StreamID) ->
     Pid = self(),
     receive

@@ -63,7 +63,16 @@ reply_error_map(Error, Req) ->
     Status = maps:get(status, Error, 500),
     Code = maps:get(code, Error, <<"internal_error">>),
     Reason = maps:get(reason, Error, <<"Internal server error">>),
-    Opts0 = #{request_id => maps:get(request_id, Error, <<"unknown">>)},
+    TelemetryContext = maps:get(telemetry_context, Error, #{
+        route => maps:get(route, Error, <<"unknown">>),
+        op => maps:get(op, Error, undefined),
+        alias => maps:get(alias, Error, undefined),
+        error_code => Code
+    }),
+    Opts0 = #{
+        request_id => maps:get(request_id, Error, <<"unknown">>),
+        telemetry_context => TelemetryContext
+    },
     Opts1 = case maps:find(allow, Error) of
         {ok, Allow} -> Opts0#{allow => Allow};
         error -> Opts0
@@ -98,6 +107,7 @@ telemetry_tags(Context, Status, DurationUs) ->
         route => maps:get(route, Context, <<"unknown">>),
         op => maps:get(op, Context, undefined),
         alias => maps:get(alias, Context, undefined),
+        error_code => maps:get(error_code, Context, undefined),
         status => Status,
         duration_us => DurationUs
     }.

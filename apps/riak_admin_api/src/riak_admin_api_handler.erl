@@ -553,26 +553,30 @@ execute_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
         {error, Error} when is_map(Error) ->
-            riak_admin_api_response:reply_error_map(with_request_id(Error, ReplyOpts), Req);
+            riak_admin_api_response:reply_error_map(
+                with_error_context(Error, Context, ReplyOpts),
+                Req);
         {error, Reason} ->
             riak_admin_api_response:reply_error_map(
-                with_request_id(
+                with_error_context(
                     #{
                         status => 500,
                         code => <<"backend_error">>,
                         reason => iolist_to_binary(io_lib:format("~p", [Reason]))
                     },
+                    Context,
                     ReplyOpts),
                 Req);
         Other ->
             riak_admin_api_response:reply_error_map(
-                with_request_id(
+                with_error_context(
                     #{
                         status => 500,
                         code => <<"backend_error">>,
                         reason => iolist_to_binary(io_lib:format(
                             "Unexpected backend reply: ~p", [Other]))
                     },
+                    Context,
                     ReplyOpts),
                 Req)
     end.
@@ -583,26 +587,30 @@ execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
         {error, Error} when is_map(Error) ->
-            riak_admin_api_response:reply_error_map(with_request_id(Error, ReplyOpts), Req);
+            riak_admin_api_response:reply_error_map(
+                with_error_context(Error, Context, ReplyOpts),
+                Req);
         {error, Reason} ->
             riak_admin_api_response:reply_error_map(
-                with_request_id(
+                with_error_context(
                     #{
                         status => 500,
                         code => <<"backend_error">>,
                         reason => iolist_to_binary(io_lib:format("~p", [Reason]))
                     },
+                    Context,
                     ReplyOpts),
                 Req);
         Other ->
             riak_admin_api_response:reply_error_map(
-                with_request_id(
+                with_error_context(
                     #{
                         status => 500,
                         code => <<"backend_error">>,
                         reason => iolist_to_binary(io_lib:format(
                             "Unexpected backend reply: ~p", [Other]))
                     },
+                    Context,
                     ReplyOpts),
                 Req)
     end.
@@ -788,6 +796,22 @@ with_request_id(Error, ReplyOpts) ->
     case maps:is_key(request_id, Error) of
         true -> Error;
         false -> Error#{request_id => maps:get(request_id, ReplyOpts, <<"unknown">>)}
+    end.
+
+with_error_context(Error0, Context, ReplyOpts) ->
+    Error1 = with_request_id(Error0, ReplyOpts),
+    case maps:is_key(telemetry_context, Error1) of
+        true ->
+            Error1;
+        false ->
+            Error1#{
+                telemetry_context => #{
+                    route => maps:get(route, Context, <<"unknown">>),
+                    op => maps:get(op, Context, undefined),
+                    alias => maps:get(alias, Context, undefined),
+                    error_code => maps:get(code, Error1, <<"internal_error">>)
+                }
+            }
     end.
 
 request_opts(RouteOpts) ->

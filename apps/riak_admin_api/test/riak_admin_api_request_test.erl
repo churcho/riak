@@ -440,6 +440,33 @@ normalize_cutover_explicit_enabled_overrides_default_disabled_test() ->
     {ok, Context, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
     ?assertEqual(mapred, maps:get(op, Context)).
 
+normalize_cutover_invalid_op_mode_blocks_with_config_error_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/mapred">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-invalid-op-mode">>}
+    },
+    Opts = #{
+        cutover_default_mode => enabled,
+        cutover_op_modes => #{mapred => <<"typo-mode">>}
+    },
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"route_cutover_misconfigured">>, maps:get(code, Err)).
+
+normalize_cutover_invalid_default_mode_falls_back_to_enabled_test() ->
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/mapred">>,
+        headers => #{<<"x-request-id">> => <<"rid-cutover-invalid-default">>}
+    },
+    Opts = #{
+        cutover_default_mode => <<"typo-mode">>,
+        cutover_op_modes => #{}
+    },
+    {ok, Context, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(mapred, maps:get(op, Context)).
+
 normalize_full_request_test() ->
     Req0 = #{
         method => <<"GET">>,

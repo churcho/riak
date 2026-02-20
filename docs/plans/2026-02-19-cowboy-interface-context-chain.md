@@ -27,7 +27,7 @@ This file is the cross-branch handoff ledger for new context windows/agents.
 
 | Track | Branch | Base Commit | End Commit | PR | Status | Notes |
 |---|---|---|---|---|---|---|
-| D01 | `feature/cowboy-d01-multidc-distribution` | TBD | TBD | TBD | Deferred | Multi-DC data distribution/routing and syn evolution after Cowboy parity cutover |
+| D01 | `feature/cowboy-d01-multidc-distribution` | d7fe2c4c | see_report_back_output | N/A (report-back) | Done | Produced D01 routing/distribution/syn-rollout artifacts, created MDC + critical-control diagrams, and completed safe P0/P1 remediations for cutover misconfiguration fail-closed behavior and telemetry `error_code` tagging with targeted + full eunit verification |
 
 Reference doc:
 - `docs/plans/2026-02-19-cowboy-interface-d01-multidc-distribution-followup.md`
