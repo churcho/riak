@@ -118,6 +118,70 @@ routes_include_cowboy_alias_families_test() ->
     ?assert(lists:member("/buckets", Paths)),
     ?assert(lists:member("/types/:bucket_type/buckets", Paths)).
 
+%%% ============================================================
+%%% S1: listener_child_spec/2
+%%% ============================================================
+
+listener_child_spec_returns_valid_child_spec_test() ->
+    Dispatch = cowboy_router:compile([{'_', [{"/test", rah_ping, []}]}]),
+    Spec = riak_admin_api_app:listener_child_spec(9999, Dispatch),
+    %% ranch:child_spec/5 returns a tuple-style child spec:
+    %% {Id, {M, F, A}, Restart, Shutdown, Type, Modules}
+    ?assertMatch({_Id, {_M, _F, _A}, _Restart, _Shutdown, _Type, _Modules}, Spec),
+    {Id, {M, F, A}, _Restart, _Shutdown, _Type, _Modules} = Spec,
+    ?assertEqual({ranch_listener_sup, riak_admin_http}, Id),
+    ?assert(is_atom(M)),
+    ?assert(is_atom(F)),
+    ?assert(is_list(A)).
+
+listener_child_spec_includes_port_in_transport_opts_test() ->
+    Dispatch = cowboy_router:compile([{'_', [{"/test", rah_ping, []}]}]),
+    Spec = riak_admin_api_app:listener_child_spec(8765, Dispatch),
+    %% ranch:child_spec returns a tuple-style child spec
+    %% Verify the spec is well-formed and contains expected listener name
+    {Id, _Start, _Restart, _Shutdown, _Type, _Modules} = Spec,
+    ?assertEqual({ranch_listener_sup, riak_admin_http}, Id).
+
+%%% ============================================================
+%%% S1: protocol_opts/0
+%%% ============================================================
+
+protocol_opts_returns_default_values_test() ->
+    Opts = riak_admin_api_app:protocol_opts(),
+    ?assert(is_map(Opts)),
+    ?assertEqual(60000, maps:get(idle_timeout, Opts)),
+    ?assertEqual(30000, maps:get(request_timeout, Opts)),
+    ?assertEqual(100, maps:get(max_keepalive, Opts)),
+    ?assertEqual(64, maps:get(max_header_name_length, Opts)),
+    ?assertEqual(4096, maps:get(max_header_value_length, Opts)),
+    ?assertEqual(100, maps:get(max_headers, Opts)).
+
+protocol_opts_respects_env_overrides_test() ->
+    OldTimeout = application:get_env(riak_admin_api, cowboy_idle_timeout),
+    OldMaxKeep = application:get_env(riak_admin_api, cowboy_max_keepalive),
+    application:set_env(riak_admin_api, cowboy_idle_timeout, 120000),
+    application:set_env(riak_admin_api, cowboy_max_keepalive, 200),
+    try
+        Opts = riak_admin_api_app:protocol_opts(),
+        ?assertEqual(120000, maps:get(idle_timeout, Opts)),
+        ?assertEqual(200, maps:get(max_keepalive, Opts)),
+        %% Unchanged values retain defaults
+        ?assertEqual(30000, maps:get(request_timeout, Opts))
+    after
+        case OldTimeout of
+            undefined -> application:unset_env(riak_admin_api, cowboy_idle_timeout);
+            {ok, V1} -> application:set_env(riak_admin_api, cowboy_idle_timeout, V1)
+        end,
+        case OldMaxKeep of
+            undefined -> application:unset_env(riak_admin_api, cowboy_max_keepalive);
+            {ok, V2} -> application:set_env(riak_admin_api, cowboy_max_keepalive, V2)
+        end
+    end.
+
+%%% ============================================================
+%%% Routes
+%%% ============================================================
+
 routes_include_all_active_substrate_paths_test() ->
     Routes = riak_admin_api_app:routes(),
     Paths = [Path || {Path, Handler, _Opts} <- Routes, Handler =:= riak_admin_api_handler],

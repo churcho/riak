@@ -132,15 +132,61 @@ ensure_security(Context, Opts) ->
         ok ->
             case ensure_origin(Context, Opts) of
                 ok ->
-                    case run_security_hook(authn_fun, Context, Opts) of
-                        ok -> run_security_hook(authz_fun, Context, Opts);
-                        Error -> Error
+                    case ensure_auth_guardrails(Opts) of
+                        ok ->
+                            case run_security_hook(authn_fun, Context, Opts) of
+                                ok -> run_security_hook(authz_fun, Context, Opts);
+                                Error -> Error
+                            end;
+                        Error ->
+                            Error
                     end;
                 Error ->
                     Error
             end;
         Error ->
             Error
+    end.
+
+%% @doc Fail-fast guardrail for missing auth hooks in protected deployments.
+%%
+%% S1: When `security_require_auth' is set to `true' in application env
+%% or passed in Opts, AND no authn_fun/authz_fun is configured, requests
+%% are rejected with 503. This prevents accidental unprotected operation
+%% in production deployments where auth is mandatory.
+%%
+%% Default: false (no guardrail — backward-compatible with existing
+%% test and development environments).
+-spec ensure_auth_guardrails(map()) -> ok | {error, map()}.
+ensure_auth_guardrails(Opts) ->
+    RequireAuth = maps:get(require_auth, Opts,
+        application:get_env(riak_admin_api, security_require_auth, false)),
+    case RequireAuth of
+        true ->
+            HasAuthn = maps:is_key(authn_fun, Opts),
+            HasAuthz = maps:is_key(authz_fun, Opts),
+            case {HasAuthn, HasAuthz} of
+                {false, _} ->
+                    logger:error("[riak_admin] security_require_auth is true "
+                                 "but no authn_fun is configured — rejecting request"),
+                    {error, #{
+                        status => 503,
+                        code => <<"auth_not_configured">>,
+                        reason => <<"Authentication is required but no auth provider is configured">>
+                    }};
+                {_, false} ->
+                    logger:error("[riak_admin] security_require_auth is true "
+                                 "but no authz_fun is configured — rejecting request"),
+                    {error, #{
+                        status => 503,
+                        code => <<"auth_not_configured">>,
+                        reason => <<"Authorization is required but no auth provider is configured">>
+                    }};
+                {true, true} ->
+                    ok
+            end;
+        _ ->
+            ok
     end.
 
 normalize_riak(Method, Tail, Query) ->

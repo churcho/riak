@@ -864,10 +864,16 @@ request_opts(RouteOpts) ->
         riak_admin_api,
         cowboy_cutover_op_modes,
         []),
+    %% S1: Add require_auth passthrough for auth guardrails
+    DefaultRequireAuth = application:get_env(
+        riak_admin_api,
+        security_require_auth,
+        false),
     RouteMap#{
         require_tls => maps:get(require_tls, RouteMap, DefaultRequireTLS),
         trust_proxy_headers => maps:get(trust_proxy_headers, RouteMap, DefaultTrustProxyHeaders),
         trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins),
+        require_auth => maps:get(require_auth, RouteMap, DefaultRequireAuth),
         cutover_default_mode => maps:get(
             cutover_default_mode,
             RouteMap,

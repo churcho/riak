@@ -215,6 +215,61 @@ body_size_limit_allows_within_limit_body_test() ->
         end
     end.
 
+%%% ============================================================
+%%% S1: require_auth passthrough in handler init
+%%% ============================================================
+
+handler_init_with_require_auth_blocks_without_hooks_test() ->
+    %% When require_auth=true is passed via route opts with no auth hooks,
+    %% the handler should return 503 auth_not_configured.
+    StreamID = {require_auth_test, make_ref()},
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-auth-guardrail">>},
+        pid => self(),
+        streamid => StreamID
+    },
+    RouteOpts = #{
+        require_auth => true,
+        cutover_default_mode => enabled
+    },
+    {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
+    {Status, _Headers, Body} = receive_response_for_stream(StreamID),
+    ?assertEqual(503, Status),
+    Decoded = jsx:decode(Body, [return_maps]),
+    ?assertEqual(<<"auth_not_configured">>, maps:get(<<"error">>, Decoded)).
+
+handler_init_with_require_auth_and_hooks_passes_through_test() ->
+    %% When require_auth=true and both hooks are present, auth guardrails pass.
+    %% The request will proceed to dispatch (which may fail for other reasons
+    %% since we don't have a real backend, but the auth check itself passes).
+    StreamID = {require_auth_pass_test, make_ref()},
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-auth-pass">>},
+        pid => self(),
+        streamid => StreamID
+    },
+    RouteOpts = #{
+        require_auth => true,
+        authn_fun => fun(_Ctx) -> ok end,
+        authz_fun => fun(_Ctx) -> ok end,
+        cutover_default_mode => enabled,
+        object_backend => fun(get, _Ctx, _Input) ->
+            {ok, #{status => 200, body => <<"{}">>}}
+        end
+    },
+    {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
+    {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
+    %% Should NOT be 503 — the request got past auth guardrails
+    ?assertNotEqual(503, Status).
+
+%%% ============================================================
+%%% Helpers
+%%% ============================================================
+
 expected_method_not_allowed_reason(Method) ->
     iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])).
 

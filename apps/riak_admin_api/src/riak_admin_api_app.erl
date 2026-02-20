@@ -45,16 +45,22 @@
 -export([start/2, stop/1]).
 
 -ifdef(TEST).
--export([routes/0]).
+-export([routes/0, listener_child_spec/2, protocol_opts/0]).
 -endif.
 
 %% @doc Start the admin API HTTP server and supervisor tree.
 %%
-%% Startup sequence:
+%% Startup sequence (S1 revised):
 %% 1. Configure syn event handler (must happen before scope init)
 %% 2. Initialize syn scope (creates local ETS tables)
-%% 3. Resolve HTTP port and start Cowboy listener
-%% 4. Start supervisor tree (which starts the coordinator)
+%% 3. Resolve HTTP port and build listener child spec
+%% 4. Start supervisor tree (listener + coordinator under supervision)
+%%
+%% S1 change: The Cowboy listener is now started under the supervisor
+%% tree via cowboy:start_clear/3 in the supervisor init, rather than
+%% outside the tree. If the listener crashes, the supervisor restarts
+%% it automatically — previously a listener crash left the admin API
+%% silently unavailable (CG-017).
 -spec start(term(), term()) ->
     {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
@@ -80,24 +86,13 @@ start(_StartType, _StartArgs) ->
         {'_', routes()}
     ]),
 
-    case cowboy:start_clear(
-            riak_admin_http,
-            [{port, Port}],
-            #{env => #{dispatch => Dispatch}}) of
-        {ok, _Pid} ->
-            logger:info("[riak_admin] API started on port ~B", [Port]),
-            case riak_admin_api_sup:start_link() of
-                {ok, SupPid} ->
-                    {ok, SupPid};
-                {error, SupReason} ->
-                    %% Supervisor failed — stop the listener so the
-                    %% port is freed for the next startup attempt.
-                    %% OTP does NOT call stop/1 when start/2 fails.
-                    cowboy:stop_listener(riak_admin_http),
-                    logger:error("[riak_admin] Supervisor failed: ~p "
-                                 "(listener cleaned up)", [SupReason]),
-                    {error, SupReason}
-            end;
+    %% S1: Build listener child spec for supervised startup.
+    ListenerSpec = listener_child_spec(Port, Dispatch),
+
+    case riak_admin_api_sup:start_link(ListenerSpec) of
+        {ok, SupPid} ->
+            logger:info("[riak_admin] API started on port ~B (supervised)", [Port]),
+            {ok, SupPid};
         {error, Reason} ->
             logger:error(
                 "[riak_admin] API failed to start on port ~B: ~p",
@@ -106,10 +101,62 @@ start(_StartType, _StartArgs) ->
     end.
 
 %% @doc Stop the admin API HTTP server.
+%%
+%% S1: The listener is now supervised, so stopping the supervisor
+%% tree will stop it. We call cowboy:stop_listener as a safety net.
 -spec stop(term()) -> ok.
 stop(_State) ->
     cowboy:stop_listener(riak_admin_http),
     ok.
+
+%% @doc Build a Cowboy listener child spec for supervised startup.
+%%
+%% S1 (CG-017): Uses ranch:child_spec/5 to produce a spec suitable
+%% for inclusion in the supervisor tree. Protocol options include
+%% explicit timeouts and limits to prevent resource exhaustion.
+-spec listener_child_spec(pos_integer(), cowboy_router:dispatch_rules()) ->
+    supervisor:child_spec().
+listener_child_spec(Port, Dispatch) ->
+    ProtocolOpts = protocol_opts(),
+    Env = #{env => #{dispatch => Dispatch}},
+    ProtoOptsWithEnv = maps:merge(ProtocolOpts, Env),
+    ranch:child_spec(
+        riak_admin_http,
+        ranch_tcp,
+        [{port, Port}],
+        cowboy_clear,
+        ProtoOptsWithEnv).
+
+%% @doc Protocol options for the Cowboy listener.
+%%
+%% S1: Explicit timeouts and limits prevent resource exhaustion from
+%% slow/malicious clients. All values are configurable via application
+%% env with safe defaults.
+%%
+%% | Key | Default | Description |
+%% |-----|---------|-------------|
+%% | idle_timeout | 60000 ms | Close idle keep-alive connections after 60s |
+%% | request_timeout | 30000 ms | Max time to receive a complete request |
+%% | max_keepalive | 100 | Max requests per connection |
+%% | max_header_name_length | 64 | Reject headers with names > 64 bytes |
+%% | max_header_value_length | 4096 | Reject headers with values > 4096 bytes |
+%% | max_headers | 100 | Max number of headers per request |
+-spec protocol_opts() -> map().
+protocol_opts() ->
+    #{
+        idle_timeout => application:get_env(
+            riak_admin_api, cowboy_idle_timeout, 60000),
+        request_timeout => application:get_env(
+            riak_admin_api, cowboy_request_timeout, 30000),
+        max_keepalive => application:get_env(
+            riak_admin_api, cowboy_max_keepalive, 100),
+        max_header_name_length => application:get_env(
+            riak_admin_api, cowboy_max_header_name_length, 64),
+        max_header_value_length => application:get_env(
+            riak_admin_api, cowboy_max_header_value_length, 4096),
+        max_headers => application:get_env(
+            riak_admin_api, cowboy_max_headers, 100)
+    }.
 
 %% @doc Resolve the HTTP port for this node.
 %%

@@ -71,3 +71,27 @@ Global verification: `All 200 tests passed`.
 
 - Benchmarks are micro-level and in-process; they do not include socket I/O, network latency, real Riak cluster contention, or multi-node fanout.
 - Stream-mode endpoints still use aggregated-body compatibility responses, so chunk/backpressure behavior remains a known gap for production-scale traffic.
+
+---
+
+## S1 Resilience Hardening Addendum
+
+Date: 2026-02-20
+Branch: `feature/cowboy-s1-resilience-perf`
+
+### S1 Performance Impact Assessment
+
+| Change | Expected Impact | Risk |
+|---|---|---|
+| Listener under supervisor | Negligible — adds one supervisor level; ranch already manages acceptor pools | Low |
+| Protocol limits (idle_timeout, request_timeout, etc.) | Positive — bounds resource consumption from slow/abandoned connections | Low |
+| Parallel pings (CG-015) | Positive — cluster_status latency bounded to max 3s instead of N * TCP timeout for N unreachable nodes | Low |
+| Stream collection ceiling (CG-016) | Positive — prevents unbounded handler blocking; normal operations unaffected since ceiling (5 min) >> typical stream time | Low |
+| MapReduce timeout 503 (CG-018) | Negligible — status code change only, no latency impact | Low |
+| list_keys error mode toggle | Negligible — single branch in error path | Low |
+| Auth guardrails | Negligible — single map lookup added to ensure_security chain (default: disabled) | Low |
+
+### S1 Verification
+
+Command: `./rebar3 eunit --module=riak_admin_api_app_test,riak_admin_api_riak_test,riak_admin_api_request_test,riak_admin_api_handler_test`
+Result: All 151 tests passed.

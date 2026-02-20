@@ -1,7 +1,7 @@
-# Cowboy Critical Remediation Notes (D01 + S0)
+# Cowboy Critical Remediation Notes (D01 + S0 + S1)
 
 Date: 2026-02-20
-Status: D01 + S0 pass notes
+Status: D01 + S0 + S1 pass notes
 
 ## Remediations Implemented in D01
 
@@ -175,6 +175,120 @@ Why safe:
 
 - Documentation-only change; no runtime behavior modification.
 
+## Remediations Implemented in S1
+
+### S1-001: Listener supervision + protocol limits (CG-017)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_app.erl`
+- `apps/riak_admin_api/src/riak_admin_api_sup.erl`
+- `apps/riak_admin_api/test/riak_admin_api_app_test.erl`
+
+What changed:
+
+- Cowboy listener moved under supervisor via `ranch:child_spec/5`.
+- Supervisor strategy changed to `rest_for_one` (listener crash restarts coordinator).
+- Added configurable protocol limits (idle_timeout, request_timeout, max_keepalive, max_header_name_length, max_header_value_length, max_headers).
+
+Why safe:
+
+- Listener crash now auto-restarts instead of silent unavailability. Protocol limits have safe defaults.
+
+Verification:
+
+- `listener_child_spec_returns_valid_child_spec_test` passes.
+- `protocol_opts_returns_default_values_test` passes.
+- `protocol_opts_respects_env_overrides_test` passes.
+
+### S1-002: Parallel pings with bounded timeout (CG-015)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+- `apps/riak_admin_api/test/riak_admin_api_riak_test.erl`
+
+What changed:
+
+- `cluster_status/0` now uses `parallel_ping_nodes/2` instead of sequential `net_adm:ping/1`.
+- Configurable via `cluster_status_ping_timeout` (default: 3000 ms).
+
+Why safe:
+
+- Total cluster_status latency bounded to timeout regardless of unreachable node count.
+
+Verification:
+
+- `parallel_ping_nodes_empty_list_test` passes.
+- `parallel_ping_nodes_unreachable_returns_false_test` passes.
+
+### S1-003: Stream collection ceiling (CG-016)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+- `apps/riak_admin_api/test/riak_admin_api_riak_test.erl`
+
+What changed:
+
+- Added `stream_collection_ceiling/0` (default: 300000 ms) as safety cap on `collect_stream_buckets` and `collect_stream_keys` loops.
+- Warning logged when ceiling fires.
+
+Why safe:
+
+- Does not replace per-stream timeouts — applied as `min(stream_timeout, ceiling)`.
+
+Verification:
+
+- `stream_collection_ceiling_default_test` passes.
+- `stream_collection_ceiling_override_test` passes.
+
+### S1-004: MapReduce timeout unified to 503 (CG-005/CG-018)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+- `apps/riak_admin_api/test/riak_admin_api_riak_test.erl`
+
+What changed:
+
+- MapReduce timeout errors return `503 timeout` (was `500 timeout`) in both chunked and nonchunked paths.
+- Added `list_keys_error_mode/0` toggle: `compat` (default, 200 with embedded error) or `strict` (proper HTTP error).
+
+Why safe:
+
+- 503 is correct HTTP semantics for retryable timeout. `compat` mode preserves backward compatibility.
+
+Verification:
+
+- `mapred_timeout_error_map_returns_503_test` passes.
+- `list_keys_error_mode_default_compat_test` passes.
+- `list_keys_error_mode_strict_test` passes.
+
+### S1-005: Auth guardrails fail-fast (new)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_request.erl`
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+- `apps/riak_admin_api/test/riak_admin_api_request_test.erl`
+- `apps/riak_admin_api/test/riak_admin_api_handler_test.erl`
+
+What changed:
+
+- Added `ensure_auth_guardrails/1` in `ensure_security` chain.
+- When `security_require_auth` is `true` and no auth hooks configured, returns `503 auth_not_configured`.
+
+Why safe:
+
+- Default is `false` — no behavior change for existing deployments.
+
+Verification:
+
+- `auth_guardrail_true_no_hooks_returns_503_test` passes.
+- `auth_guardrail_true_both_hooks_passes_test` passes.
+- `handler_init_with_require_auth_blocks_without_hooks_test` passes.
+
 ## Deferred Remediation Plans
 
 ### D-001: True incremental streaming/backpressure (CG-001)
@@ -195,12 +309,7 @@ Acceptance criteria:
 
 ### D-003: Timeout semantics alignment (CG-005)
 
-Acceptance criteria:
-
-- Choose one policy:
-  - normalize mapred timeout to `503 timeout`, or
-  - codify intentional divergence with explicit docs and client guidance.
-- Add endpoint-level timeout contract tests.
+Status: **Closed (S1)** — MapReduce timeout unified to 503 via `mapred_timeout_error_map/0`.
 
 ### D-004: MapReduce backend availability control (CG-006)
 
@@ -226,25 +335,16 @@ Acceptance criteria:
 
 ### SD-001: net_adm:ping sequential latency (CG-015)
 
-Acceptance criteria:
-
-- Async or parallel pings with timeout ceiling.
-- Cached reachability with TTL to bound response time.
+Status: **Closed (S1)** — replaced with `parallel_ping_nodes/2`.
 
 ### SD-002: Stream collection handler blocking (CG-016)
 
-Acceptance criteria:
-
-- Separate collection process with backpressure.
-- Handler process freed immediately after spawning collector.
+Status: **Closed (S1)** — added `stream_collection_ceiling/0` safety cap. Full spawn-with-backpressure remains a future optimization (see CG-001).
 
 ### SD-003: Listener supervision architecture (CG-017)
 
-Acceptance criteria:
-
-- Move Cowboy listener under supervisor using `cowboy:child_spec/3`.
-- Crash recovery test.
+Status: **Closed (S1)** — listener under supervisor via `ranch:child_spec/5`.
 
 ### SD-004: Timeout contract unification (CG-018)
 
-See D-003 / CG-005.
+Status: **Closed (S1)** — see D-003 / S1-004.

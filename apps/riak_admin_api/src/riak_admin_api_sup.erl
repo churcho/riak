@@ -2,32 +2,42 @@
 %%% @doc
 %%% Top-level supervisor for riak_admin_api.
 %%%
-%%% Children:
+%%% Children (S1 revised):
+%%% - riak_admin_http: Cowboy listener (ranch child spec)
 %%% - riak_admin_api_coordinator: syn registration lifecycle
 %%%
-%%% Restart strategy: one_for_one — each child is restarted
-%%% independently. The intensity (5 restarts in 10 seconds) provides
+%%% Restart strategy: rest_for_one — if the listener crashes, the
+%%% coordinator is also restarted (it depends on the listener being
+%%% available). The intensity (5 restarts in 10 seconds) provides
 %%% reasonable fault tolerance without masking persistent failures.
+%%%
+%%% S1 change (CG-017): The Cowboy listener is now supervised here
+%%% instead of being started outside the supervision tree. A listener
+%%% crash triggers automatic restart rather than silent unavailability.
 %%% @end
 %%%-------------------------------------------------------------------
 
 -module(riak_admin_api_sup).
 -behaviour(supervisor).
 
--export([start_link/0, init/1]).
+-export([start_link/1, init/1]).
 
-%% @doc Start the supervisor and register it locally as
-%% `riak_admin_api_sup'.
--spec start_link() -> {ok, pid()} | {error, term()}.
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+%% @doc Start the supervisor with the listener child spec.
+%%
+%% The listener spec is built by riak_admin_api_app and passed here
+%% so that the supervisor owns the Cowboy listener process.
+-spec start_link(supervisor:child_spec()) -> {ok, pid()} | {error, term()}.
+start_link(ListenerSpec) ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, [ListenerSpec]).
 
 %% @doc Supervisor init callback.
 %%
-%% Children:
-%% - riak_admin_api_coordinator: syn registration lifecycle
--spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
-init([]) ->
+%% Children (in start order):
+%% 1. riak_admin_http: Cowboy listener (must start first)
+%% 2. riak_admin_api_coordinator: syn registration lifecycle
+-spec init([supervisor:child_spec()]) ->
+    {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
+init([ListenerSpec]) ->
     Coordinator = #{
         id => riak_admin_api_coordinator,
         start => {riak_admin_api_coordinator, start_link, []},
@@ -35,5 +45,5 @@ init([]) ->
         shutdown => 5000,
         type => worker
     },
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10},
-          [Coordinator]}}.
+    {ok, {#{strategy => rest_for_one, intensity => 5, period => 10},
+          [ListenerSpec, Coordinator]}}.

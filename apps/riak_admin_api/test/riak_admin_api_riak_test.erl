@@ -277,3 +277,111 @@ accept_doc_value_non_erlang_passthrough_test() ->
     ?assertEqual(Body,
         riak_admin_api_riak:accept_doc_value(
             <<"application/json">>, Body)).
+
+%%% ============================================================
+%%% S1: parallel_ping_nodes/2 (CG-015)
+%%% ============================================================
+
+parallel_ping_nodes_empty_list_test() ->
+    %% No nodes => empty results map
+    ?assertEqual(#{}, riak_admin_api_riak:parallel_ping_nodes([], 1000)).
+
+parallel_ping_nodes_unreachable_returns_false_test() ->
+    %% A nonexistent node should be unreachable (pang).
+    FakeNode = 'fake_node_s1_test@127.0.0.1',
+    Result = riak_admin_api_riak:parallel_ping_nodes([FakeNode], 2000),
+    ?assertEqual(#{FakeNode => false}, Result).
+
+parallel_ping_nodes_multiple_unreachable_test() ->
+    %% Multiple fake nodes should all be false.
+    FakeA = 'fake_a_s1_test@127.0.0.1',
+    FakeB = 'fake_b_s1_test@127.0.0.1',
+    Result = riak_admin_api_riak:parallel_ping_nodes([FakeA, FakeB], 2000),
+    ?assertEqual(false, maps:get(FakeA, Result)),
+    ?assertEqual(false, maps:get(FakeB, Result)).
+
+parallel_ping_nodes_returns_map_with_correct_keys_test() ->
+    %% Verify the returned map has entries for all requested nodes.
+    FakeA = 'fake_keys_a@127.0.0.1',
+    FakeB = 'fake_keys_b@127.0.0.1',
+    Result = riak_admin_api_riak:parallel_ping_nodes([FakeA, FakeB], 2000),
+    ?assert(maps:is_key(FakeA, Result)),
+    ?assert(maps:is_key(FakeB, Result)).
+
+%%% ============================================================
+%%% S1: mapred_timeout_error_map/0 (CG-005/CG-018)
+%%% ============================================================
+
+mapred_timeout_error_map_returns_503_test() ->
+    Error = riak_admin_api_riak:mapred_timeout_error_map(),
+    ?assertEqual(503, maps:get(status, Error)),
+    ?assertEqual(<<"timeout">>, maps:get(code, Error)),
+    ?assertEqual(<<"timeout">>, maps:get(reason, Error)).
+
+%%% ============================================================
+%%% S1: list_keys_error_mode/0 (CG-005)
+%%% ============================================================
+
+list_keys_error_mode_default_compat_test() ->
+    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
+    application:unset_env(riak_admin_api, list_keys_error_mode),
+    try
+        ?assertEqual(compat, riak_admin_api_riak:list_keys_error_mode())
+    after
+        case OldVal of
+            undefined -> ok;
+            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
+        end
+    end.
+
+list_keys_error_mode_strict_test() ->
+    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
+    application:set_env(riak_admin_api, list_keys_error_mode, strict),
+    try
+        ?assertEqual(strict, riak_admin_api_riak:list_keys_error_mode())
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, list_keys_error_mode);
+            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
+        end
+    end.
+
+list_keys_error_mode_invalid_falls_back_to_compat_test() ->
+    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
+    application:set_env(riak_admin_api, list_keys_error_mode, <<"invalid">>),
+    try
+        ?assertEqual(compat, riak_admin_api_riak:list_keys_error_mode())
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, list_keys_error_mode);
+            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
+        end
+    end.
+
+%%% ============================================================
+%%% S1: stream_collection_ceiling/0 (CG-016)
+%%% ============================================================
+
+stream_collection_ceiling_default_test() ->
+    OldVal = application:get_env(riak_admin_api, stream_collection_ceiling_ms),
+    application:unset_env(riak_admin_api, stream_collection_ceiling_ms),
+    try
+        ?assertEqual(300000, riak_admin_api_riak:stream_collection_ceiling())
+    after
+        case OldVal of
+            undefined -> ok;
+            {ok, V} -> application:set_env(riak_admin_api, stream_collection_ceiling_ms, V)
+        end
+    end.
+
+stream_collection_ceiling_override_test() ->
+    OldVal = application:get_env(riak_admin_api, stream_collection_ceiling_ms),
+    application:set_env(riak_admin_api, stream_collection_ceiling_ms, 60000),
+    try
+        ?assertEqual(60000, riak_admin_api_riak:stream_collection_ceiling())
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, stream_collection_ceiling_ms);
+            {ok, V} -> application:set_env(riak_admin_api, stream_collection_ceiling_ms, V)
+        end
+    end.

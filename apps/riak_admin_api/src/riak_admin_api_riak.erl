@@ -88,7 +88,12 @@
     counter_delta_from_body/1,
     crdt_decode_update_body/2,
     crdt_response_body/4,
-    accept_doc_value/2
+    accept_doc_value/2,
+    %% S1 test exports
+    parallel_ping_nodes/2,
+    mapred_timeout_error_map/0,
+    list_keys_error_mode/0,
+    stream_collection_ceiling/0
 ]).
 -endif.
 
@@ -960,16 +965,25 @@ stream_buckets_reply(BucketType, Timeout, Client) ->
     end.
 
 collect_stream_buckets(ReqId, Acc, Timeout) ->
+    %% S1 (CG-016): Apply ceiling timeout to prevent unbounded blocking.
+    CeilingMs = stream_collection_ceiling(),
+    EffectiveTimeout = erlang:min(Timeout, CeilingMs),
+    collect_stream_buckets_loop(ReqId, Acc, EffectiveTimeout).
+
+collect_stream_buckets_loop(ReqId, Acc, Timeout) ->
     receive
         {ReqId, done} ->
             iolist_to_binary(lists:reverse([encode_bucket_list([]) | Acc]));
         {ReqId, _From, {buckets_stream, Buckets}} ->
-            collect_stream_buckets(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
+            collect_stream_buckets_loop(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
         {ReqId, {buckets_stream, Buckets}} ->
-            collect_stream_buckets(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
+            collect_stream_buckets_loop(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
         {ReqId, {error, timeout}} ->
+            logger:warning("[riak_admin] bucket stream timed out (backend timeout)"),
             iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
     after Timeout ->
+        logger:warning("[riak_admin] bucket stream timed out after ~Bms ceiling",
+                       [Timeout]),
         iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
     end.
 
@@ -1019,8 +1033,32 @@ list_keys_reply(Bucket, Timeout, BucketPropsJson, Client) ->
             Body = mochijson2:encode({struct, BucketPropsJson ++ [{?JSON_KEYS, KeyList}]}),
             {ok, json_backend_reply(200, Body)};
         {error, Reason} ->
-            Body = mochijson2:encode({struct, BucketPropsJson ++ [{error, Reason}]}),
-            {ok, json_backend_reply(200, Body)}
+            %% S1 (CG-005): Configurable error mode for list_keys failures.
+            %% Default (compat): return 200 with embedded error for backward
+            %% compatibility with existing clients.
+            %% Strict mode: return proper HTTP error status.
+            case list_keys_error_mode() of
+                strict ->
+                    {error, bucket_error_map(Reason)};
+                compat ->
+                    Body = mochijson2:encode(
+                        {struct, BucketPropsJson ++ [{error, Reason}]}),
+                    {ok, json_backend_reply(200, Body)}
+            end
+    end.
+
+%% @doc Return the list_keys error handling mode.
+%%
+%% S1: Controls whether list_keys errors return proper HTTP error
+%% status codes (strict) or 200 with embedded error (compat).
+%% Default: compat (backward-compatible behavior).
+%% Set list_keys_error_mode => strict for production deployments
+%% that prefer standard HTTP error semantics.
+-spec list_keys_error_mode() -> strict | compat.
+list_keys_error_mode() ->
+    case application:get_env(riak_admin_api, list_keys_error_mode, compat) of
+        strict -> strict;
+        _ -> compat
     end.
 
 stream_keys_reply(Bucket, Timeout0, BucketPropsJson, Context, Client) ->
@@ -1047,19 +1085,29 @@ key_stream_timeout(_) ->
     ?DEFAULT_KEY_STREAM_TIMEOUT.
 
 collect_stream_keys(ReqId, Acc, Timeout) ->
+    %% S1 (CG-016): Apply ceiling timeout to prevent unbounded blocking.
+    CeilingMs = stream_collection_ceiling(),
+    EffectiveTimeout = erlang:min(Timeout, CeilingMs),
+    collect_stream_keys_loop(ReqId, Acc, EffectiveTimeout).
+
+collect_stream_keys_loop(ReqId, Acc, Timeout) ->
     receive
         {ReqId, done} ->
             iolist_to_binary(lists:reverse([encode_key_list([]) | Acc]));
         {ReqId, From, {keys, Keys}} ->
             _ = riak_kv_keys_fsm:ack_keys(From),
-            collect_stream_keys(ReqId, [encode_key_list(Keys) | Acc], Timeout);
+            collect_stream_keys_loop(ReqId, [encode_key_list(Keys) | Acc], Timeout);
         {ReqId, {keys, Keys}} ->
-            collect_stream_keys(ReqId, [encode_key_list(Keys) | Acc], Timeout);
+            collect_stream_keys_loop(ReqId, [encode_key_list(Keys) | Acc], Timeout);
         {ReqId, {error, timeout}} ->
+            logger:warning("[riak_admin] key stream timed out (backend timeout)"),
             iolist_to_binary(lists:reverse([encode_key_stream_timeout() | Acc]));
         {ReqId, {error, Reason}} ->
+            logger:warning("[riak_admin] key stream error: ~p", [Reason]),
             iolist_to_binary(lists:reverse([encode_key_stream_error(Reason) | Acc]))
     after Timeout ->
+        logger:warning("[riak_admin] key stream timed out after ~Bms ceiling",
+                       [Timeout]),
         iolist_to_binary(lists:reverse([encode_key_stream_timeout() | Acc]))
     end.
 
@@ -1071,6 +1119,17 @@ encode_key_stream_timeout() ->
 
 encode_key_stream_error(Reason) ->
     mochijson2:encode({struct, [{error, Reason}]}).
+
+%% @doc Maximum time (ms) a stream collection loop may block the handler.
+%%
+%% S1 (CG-016): This is a safety ceiling that caps how long any stream
+%% collection (buckets, keys, index) can block the Cowboy handler
+%% process. It does NOT replace per-stream timeouts — it is applied
+%% as min(stream_timeout, ceiling) to prevent unbounded blocking.
+%% Default: 5 minutes (300000 ms). Configurable via application env.
+-spec stream_collection_ceiling() -> pos_integer().
+stream_collection_ceiling() ->
+    application:get_env(riak_admin_api, stream_collection_ceiling_ms, 300000).
 
 counter_get_operation(Context, Client) ->
     Query = maps:get(query, Context, #{}),
@@ -2041,7 +2100,9 @@ mapred_collect_nonchunked_reply(Mrc, ParsedQuery) ->
             {error, mapred_backend_error(Error)};
         {error, timeout} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
-            {error, #{status => 500, code => <<"timeout">>, reason => <<"timeout">>}};
+            %% S1 (CG-005/CG-018): Unified timeout to 503 for consistency
+            %% with query_operation timeout mapping.
+            {error, mapred_timeout_error_map()};
         {error, {From, Info}} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
@@ -2076,7 +2137,8 @@ mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc) ->
             end;
         {error, timeout, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
-            {error, #{status => 500, code => <<"timeout">>, reason => <<"timeout">>}};
+            %% S1 (CG-005/CG-018): Unified timeout to 503
+            {error, mapred_timeout_error_map()};
         {error, {sender_died, Error}, _} ->
             riak_kv_mrc_pipe:cleanup_sink(Mrc),
             {error, mapred_backend_error(Error)};
@@ -2142,6 +2204,15 @@ mapred_backend_error(Reason) ->
         reason => to_bin(Reason)
     }.
 
+%% @doc Unified mapred timeout error map.
+%%
+%% S1 (CG-005/CG-018): MapReduce timeouts now return 503 instead of
+%% 500, consistent with query_operation timeout mapping. This ensures
+%% clients get a uniform timeout contract across all query-like paths.
+-spec mapred_timeout_error_map() -> map().
+mapred_timeout_error_map() ->
+    #{status => 503, code => <<"timeout">>, reason => <<"timeout">>}.
+
 %%% ============================================================
 %%% Cluster Status
 %%% ============================================================
@@ -2153,10 +2224,10 @@ mapred_backend_error(Reason) ->
 %% reachability. The returned map matches the JSON contract that
 %% the rah_cluster handler sends to clients.
 %%
-%% For each node, ring_pct is calculated as the percentage of
-%% partitions owned by that node. Reachable is determined by
-%% net_adm:ping/1 (fine for small clusters; consider caching
-%% for large ones).
+%% S1 (CG-015): Reachability is now determined by parallel pings
+%% with a bounded timeout instead of sequential net_adm:ping/1.
+%% This prevents a single unreachable node from blocking the
+%% entire cluster_status response for its full TCP timeout.
 -spec cluster_status() -> {ok, map()} | {error, term()}.
 cluster_status() ->
     try
@@ -2172,12 +2243,17 @@ cluster_status() ->
                 maps:update_with(Node, fun(C) -> C + 1 end, 1, Acc)
             end, #{}, Owners),
 
+        %% S1: Parallel pings with bounded timeout (CG-015)
+        PingTimeout = application:get_env(
+            riak_admin_api, cluster_status_ping_timeout, 3000),
+        Reachability = parallel_ping_nodes(Members, PingTimeout),
+
         Nodes = lists:map(
             fun(Node) ->
                 Status = proplists:get_value(Node, MemberStatus, unknown),
                 Count = maps:get(Node, OwnerCounts, 0),
                 Pct = round_pct(Count, NumPartitions),
-                Reachable = net_adm:ping(Node) =:= pong,
+                Reachable = maps:get(Node, Reachability, false),
                 #{name => Node, status => Status,
                   ring_pct => Pct, reachable => Reachable}
             end, Members),
@@ -2199,6 +2275,43 @@ cluster_status() ->
             logger:error("[riak_admin] cluster_status failed: ~p:~p~n~p",
                          [Class, Reason, Stack]),
             {error, {Class, Reason}}
+    end.
+
+%% @doc Ping multiple nodes in parallel with a bounded timeout.
+%%
+%% S1 (CG-015): Spawns one process per node, each calling
+%% net_adm:ping/1. The caller waits up to PingTimeout ms for all
+%% responses. Nodes that don't respond in time are marked unreachable.
+%% This bounds the total cluster_status latency to PingTimeout
+%% regardless of how many nodes are unreachable.
+-spec parallel_ping_nodes([node()], pos_integer()) -> #{node() => boolean()}.
+parallel_ping_nodes(Nodes, PingTimeout) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Pids = lists:map(
+        fun(Node) ->
+            spawn_link(fun() ->
+                Result = (net_adm:ping(Node) =:= pong),
+                Parent ! {Ref, Node, Result}
+            end)
+        end, Nodes),
+    Results = collect_ping_results(Ref, length(Nodes), PingTimeout, #{}),
+    %% Unlink spawned processes to avoid late EXIT messages
+    lists:foreach(fun(Pid) ->
+        unlink(Pid)
+    end, Pids),
+    Results.
+
+collect_ping_results(_Ref, 0, _Timeout, Acc) ->
+    Acc;
+collect_ping_results(Ref, Remaining, Timeout, Acc) ->
+    receive
+        {Ref, Node, Result} ->
+            collect_ping_results(Ref, Remaining - 1, Timeout,
+                                 Acc#{Node => Result})
+    after Timeout ->
+        %% Remaining nodes are unreachable (timed out)
+        Acc
     end.
 
 %%% ============================================================

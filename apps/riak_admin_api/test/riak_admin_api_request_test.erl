@@ -642,3 +642,76 @@ origin_not_checked_when_trusted_origins_empty_test() ->
     },
     Opts = #{trusted_origins => []},
     ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+%%% ============================================================
+%%% S1: Auth guardrails (CG-005)
+%%% ============================================================
+
+auth_guardrail_disabled_by_default_test() ->
+    %% When require_auth is not set (default false), everything passes.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+auth_guardrail_false_allows_all_test() ->
+    %% Explicitly false — same as default.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{require_auth => false},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+auth_guardrail_true_no_hooks_returns_503_test() ->
+    %% require_auth=true with no authn_fun => 503.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{require_auth => true},
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"auth_not_configured">>, maps:get(code, Err)).
+
+auth_guardrail_true_authn_only_returns_503_test() ->
+    %% require_auth=true with authn_fun but no authz_fun => 503.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{
+        require_auth => true,
+        authn_fun => fun(_Ctx) -> ok end
+    },
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"auth_not_configured">>, maps:get(code, Err)).
+
+auth_guardrail_true_authz_only_returns_503_test() ->
+    %% require_auth=true with authz_fun but no authn_fun => 503.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{
+        require_auth => true,
+        authz_fun => fun(_Ctx) -> ok end
+    },
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"auth_not_configured">>, maps:get(code, Err)).
+
+auth_guardrail_true_both_hooks_passes_test() ->
+    %% require_auth=true with both hooks configured => ok.
+    Context = #{method => <<"GET">>, headers => #{}},
+    Opts = #{
+        require_auth => true,
+        authn_fun => fun(_Ctx) -> ok end,
+        authz_fun => fun(_Ctx) -> ok end
+    },
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+auth_guardrail_respects_app_env_test() ->
+    %% Test that the app env is respected when opts don't contain require_auth.
+    OldVal = application:get_env(riak_admin_api, security_require_auth),
+    application:set_env(riak_admin_api, security_require_auth, true),
+    try
+        Context = #{method => <<"GET">>, headers => #{}},
+        Opts = #{},  %% No require_auth in opts — should read from env
+        {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+        ?assertEqual(503, maps:get(status, Err)),
+        ?assertEqual(<<"auth_not_configured">>, maps:get(code, Err))
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, security_require_auth);
+            {ok, V} -> application:set_env(riak_admin_api, security_require_auth, V)
+        end
+    end.
