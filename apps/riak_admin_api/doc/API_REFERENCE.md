@@ -5,7 +5,7 @@ The Riak Admin API runs on Cowboy (default port **8099**) alongside the legacy W
 - **Admin endpoints** (`/api/...`) -- cluster observability and management
 - **Substrate endpoints** -- compatibility layer that translates legacy Riak HTTP paths through the Cowboy stack
 
-All responses include an `X-Request-Id` header (client-supplied via the same header, or auto-generated).
+All responses include an `X-Request-Id` header (client-supplied via the same header, or auto-generated) and a set of [security headers](#authentication-and-security-headers) (`X-Content-Type-Options`, `X-Frame-Options`, `Cache-Control`, `Content-Security-Policy`).
 
 ---
 
@@ -44,6 +44,11 @@ All responses include an `X-Request-Id` header (client-supplied via the same hea
 ## Admin Endpoints
 
 All admin endpoints accept only **GET** requests and go through the `ensure_admin_get` security pipeline (TLS check, authn/authz hooks). Non-GET methods return `405 Method Not Allowed`.
+
+> **Note:** Admin endpoint routes are served by individual handler modules
+> (`rah_ping`, `rah_cluster`, etc.), not by the main dispatcher. OPTIONS
+> preflight is handled at the substrate handler level -- see
+> [CORS Headers](#cors-headers).
 
 ### Ping
 
@@ -325,7 +330,7 @@ curl -s http://localhost:8099/api/nodes/riak@127.0.0.1/stats | jq .
 | Status | Code | When |
 |--------|------|------|
 | 400 | `missing_parameter` | `:node` path parameter missing |
-| 404 | `unknown_node` | Node name not recognized (not a known Erlang atom) |
+| 404 | `unknown_node` | Node name not recognized (not a known Erlang atom) or not a current cluster member |
 | 405 | `method_not_allowed` | Non-GET method |
 | 500 | `backend_error` | Internal failure |
 | 503 | `node_unreachable` | Remote node did not respond (5s RPC timeout) |
@@ -541,13 +546,13 @@ Push-based topics publish immediately when the underlying event fires. Poll-base
 
 | Code | When |
 |------|------|
-| `invalid_message` | Frame is not valid JSON or not a JSON object |
-| `invalid_topics` | `topics` field is not an array of strings |
-| `unknown_action` | `action` value not recognized |
+| `invalid_message` | Frame is not valid JSON, not a JSON object, or `subscribe`/`unsubscribe` sent without a `topics` field |
+| `invalid_topics` | `topics` field is present but not an array of strings |
+| `unknown_action` | `action` value not recognized (reflected value is sanitized to alphanumeric characters) |
 | `rate_limited` | Subscribe sent too soon after the previous one |
 | `internal_error` | Server-side dispatch crash (logged, connection stays open) |
 
-Error frames have the shape `{"type": "error", "code": "<code>", "reason": "<message>"}`.
+Error frames have the shape `{"type": "error", "code": "<code>", "reason": "<message>"}`. All client-supplied values in error reasons are sanitized (truncated to 64 bytes, non-alphanumeric characters stripped) to prevent injection.
 
 **Example (websocat):**
 
@@ -703,7 +708,7 @@ Retrieve an object.
 | `pr` | quorum | (same) | Primary read quorum |
 | `basic_quorum` | boolean | `true`, `false` | Return early on quorum failure |
 | `notfound_ok` | boolean | `true`, `false` | Treat not-found as success for quorum |
-| `timeout` | integer | 0..4294967295 | Request timeout in ms (capped to `max_server_timeout_ms`) |
+| `timeout` | integer | 0..4294967295 | Request timeout in ms (capped to `max_server_timeout_ms`). Binary string values are parsed to integers. |
 | `vtag` | string | | Select a specific sibling by vtag |
 
 **Response (200 OK):**
@@ -1295,7 +1300,7 @@ Query secondary indexes.
 | `return_terms` | boolean | `true`, `false` | Include index terms in results |
 | `pagination_sort` | boolean | `true`, `false` | Sort results for pagination (auto-enabled with continuation) |
 | `timeout` | integer | | Timeout in ms |
-| `term_regex` | string | | Filter results by term regex (binary indexes only) |
+| `term_regex` | string | | Filter results by term regex (binary indexes only, max 256 bytes) |
 
 **Response (200 OK) -- Non-streaming:**
 
@@ -1504,6 +1509,8 @@ Streaming endpoints use **chunked transfer encoding** via Cowboy's `stream_reply
 
 CORS headers are emitted only when `security_trusted_origins` is configured and the request `Origin` header matches a trusted origin.
 
+**OPTIONS preflight:** The main substrate handler intercepts `OPTIONS` requests before dispatch and returns `204 No Content` with CORS headers. This allows browsers to preflight cross-origin requests without triggering authentication or operation dispatch.
+
 When active, responses include:
 
 | Header | Value |
@@ -1513,6 +1520,7 @@ When active, responses include:
 | `Access-Control-Allow-Headers` | `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin` |
 | `Access-Control-Expose-Headers` | `X-Request-Id, X-Riak-Vclock, ETag, Last-Modified, Link, Location` |
 | `Access-Control-Max-Age` | `3600` |
+| `Vary` | `Origin` |
 
 When `trusted_origins` is configured but the request uses an unsafe method without an `Origin` header, the request is rejected with `403 Forbidden`.
 
@@ -1531,6 +1539,17 @@ All responses may include the following headers:
 | `Location` | URI of created resource (on 201 responses) |
 
 All header values are sanitized: control characters (0x00-0x1F, 0x7F) are stripped to prevent HTTP response splitting and log injection.
+
+### Security Response Headers
+
+Every response includes these security headers (set via `security_headers/0` in the response module):
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-Content-Type-Options` | `nosniff` | Prevents MIME-type sniffing |
+| `X-Frame-Options` | `DENY` | Prevents clickjacking via iframe embedding |
+| `Cache-Control` | `no-store` | Prevents caching of admin API responses |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` | Restricts resource loading and framing |
 
 ---
 
@@ -1553,6 +1572,24 @@ Requests pass through the following security checks in order:
 3. **Auth guardrails** -- When `security_require_auth = true`, verifies that both `authn_hook` and `authz_hook` are configured. Returns `503 Service Unavailable` if hooks are missing (prevents accidental unprotected operation).
 4. **Authentication hook** -- Calls the configured `authn_fun` (function or `{Module, Function}` tuple). Can return `ok`, `allow`, `unauthorized`, `forbidden`, or `{deny, Status, Code, Reason}`.
 5. **Authorization hook** -- Same interface as authentication, called after successful authn.
+
+### Startup Security Audit
+
+On application start, `audit_security_posture/0` logs warnings about the current security configuration. This does not block startup -- it provides operational visibility. Warnings include:
+
+- No authentication or authorization configured (all endpoints publicly accessible)
+- Partial auth (authn without authz, or vice versa)
+- TLS not required
+- MapReduce backend enabled without authentication (MapReduce allows arbitrary Erlang code execution on cluster nodes)
+
+### Input Size Limits
+
+In addition to `max_request_body_bytes` (default 5 MB), two operation-specific limits are enforced:
+
+| Limit | Value | Applies to |
+|-------|-------|------------|
+| ETF deserialization | 1 MB | `application/x-erlang-binary` content type bodies -- `binary_to_term` is skipped for bodies exceeding this limit to prevent memory amplification from deeply nested terms |
+| `term_regex` length | 256 bytes | Secondary index `term_regex` query parameter -- rejects with 400 if exceeded |
 
 ---
 

@@ -874,13 +874,29 @@ Key syn details:
   variant only reaches processes on the same Erlang node, avoiding
   cross-node duplication of pre-encoded frames.
 - Each `rah_events_ws` handler joins `cluster_events` on connect via
-  `syn:join/3` (no metadata needed — the bridge doesn't inspect
+  `syn:join/3` (no metadata needed -- the bridge doesn't inspect
   group member metadata).
 - The coordinator does not participate in `cluster_events`. Its role
   is unchanged: registry + `api_nodes` group for discovery only.
 - Message format: `{event_frame, Topic, PreEncodedJSON}`. The bridge
   encodes each event once; WS handlers forward the binary directly
   without per-subscriber encoding.
+
+**Stats collection and generation tracking:**
+
+The bridge uses `spawn` (not `spawn_link`) for async stats collection
+so a collector crash does not bring down the bridge. Each collection
+cycle is tagged with a generation counter (`stats_gen`). The counter
+is threaded through three message types:
+
+- `{stats_collected, Gen, Result}` -- the worker sends this on completion.
+  The bridge pattern-matches on `Gen` to ensure it only accepts results
+  from the current generation. Results from timed-out (stale) generations
+  are silently discarded to prevent overwriting fresher data.
+- `{stats_collection_timeout, Gen}` -- a safety timer that fires at
+  `2 * bridge_stats_interval` to reset the `stats_collecting` flag if
+  the worker dies without reporting. Also matched on `Gen` so stale
+  timeouts are ignored.
 
 ### Multi-DC Health Monitoring
 

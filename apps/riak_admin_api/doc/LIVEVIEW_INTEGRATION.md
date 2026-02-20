@@ -63,7 +63,13 @@ Access-Control-Allow-Methods: GET, HEAD, PUT, POST, DELETE, OPTIONS
 Access-Control-Allow-Headers: Content-Type, X-Request-Id, X-Riak-Vclock, ...
 Access-Control-Expose-Headers: X-Request-Id, X-Riak-Vclock, ETag, ...
 Access-Control-Max-Age: 3600
+Vary: Origin
 ```
+
+The `Vary: Origin` header is included so that caches and CDNs correctly
+key responses by origin. The handler also responds to `OPTIONS` preflight
+requests with `204 No Content` plus CORS headers, without running
+authentication or operation dispatch.
 
 If `security_trusted_origins` is empty (the default), no CORS headers are
 emitted and the existing security model is preserved.
@@ -425,7 +431,7 @@ Returns Erlang VM stats and riak_kv operational metrics for a specific node.
 ```
 
 **Error responses:**
-- 404 `unknown_node` -- node name not recognised (atom does not exist)
+- 404 `unknown_node` -- node name not recognised (atom does not exist), or node is not a current cluster member
 - 503 `node_unreachable` -- node exists but RPC timed out (5s)
 
 **Recommended polling interval:** 10 seconds.
@@ -721,11 +727,13 @@ All errors have the shape:
 
 | Code | When |
 |------|------|
-| `invalid_message` | Frame is not valid JSON or not a JSON object |
-| `invalid_topics` | `topics` field is not an array of strings |
+| `invalid_message` | Frame is not valid JSON, not a JSON object, or `subscribe`/`unsubscribe` sent without `topics` |
+| `invalid_topics` | `topics` field is present but not an array of strings |
 | `unknown_action` | `action` value not recognized |
 | `rate_limited` | Subscribe sent within the rate limit window |
 | `internal_error` | Server-side dispatch crash (connection stays open) |
+
+Error reasons that reference client-supplied values are sanitized (alphanumeric only, max 64 bytes).
 
 ### Frame format
 

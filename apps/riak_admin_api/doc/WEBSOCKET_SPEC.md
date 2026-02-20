@@ -380,13 +380,18 @@ treat this as a signal to reduce its subscription scope or reconnect.
 }
 ```
 
+Error reasons that include client-supplied values are sanitized: truncated
+to 64 bytes and stripped of non-alphanumeric characters (only `a-z`,
+`A-Z`, `0-9`, `_`, `-` survive). This prevents XSS if a dashboard
+renders error reasons as HTML.
+
 Error codes:
 
 | Code | When |
 |------|------|
-| `invalid_message` | Unparseable JSON or not a JSON object |
+| `invalid_message` | Unparseable JSON, not a JSON object, or `subscribe`/`unsubscribe` sent without a `topics` field |
 | `unknown_action` | Action field is not a recognized verb |
-| `invalid_topics` | `topics` is not a JSON array of strings |
+| `invalid_topics` | `topics` field is present but is not a JSON array of strings |
 | `rate_limited` | Subscribe sent too soon after the previous one (see `ws_subscribe_min_interval`) |
 | `internal_error` | Dispatch crashed (try/catch caught it, connection stays open) |
 
@@ -431,10 +436,13 @@ Actions:
   genuinely new topic (re-subscribing is idempotent and skips the
   snapshot). Rate-limited: if called within `ws_subscribe_min_interval`
   (default 1000ms) of the last subscribe, returns a `rate_limited` error.
-- `unsubscribe` -- removes topics from state.
+  If the `topics` field is missing entirely, returns `invalid_message`.
+- `unsubscribe` -- removes topics from state. If the `topics` field is
+  missing entirely, returns `invalid_message`.
 - `ping` -- responds with `pong` + timestamp.
 - Non-array `topics` -- returns `invalid_topics` error.
-- Unknown action -- returns `unknown_action` error.
+- Unknown action -- returns `unknown_action` error (the reflected
+  action value is sanitized to alphanumeric characters only).
 - Missing action -- returns `invalid_message` error.
 
 **websocket_info/2** -- Receives `{event_frame, Topic, Frame}` from the
@@ -482,7 +490,7 @@ end),
 
 Starts poll timers for timer-based data sources.
 
-State: `#{snapshots => map(), last_services => list() | undefined, stats_collecting => boolean()}`.
+State: `#{snapshots => map(), last_services => list() | undefined, stats_collecting => boolean(), stats_gen => non_neg_integer()}`.
 
 **handle_cast(ring_changed)** -- Fetches the ring from
 `riak_core_ring_manager:get_my_ring/0` (inside the gen_server, not the
@@ -497,11 +505,20 @@ events. Publishes the `membership` topic only when the diff is non-empty.
 Triggered by the syn event handler on api_nodes group join/leave.
 
 **handle_info(poll_node_stats)** -- Starts async stats collection in
-a spawned process to avoid blocking the gen_server. Each node_stats
-RPC has a 5s timeout; doing N calls sequentially in the gen_server
-would block snapshot reads and event processing. A `stats_collecting`
-flag prevents overlapping collections. When the spawned process
-finishes, it sends `{stats_collected, Result}` back.
+a spawned process (using `spawn`, not `spawn_link`, so a crash in
+the collector does not take down the bridge). Each node_stats RPC has
+a 5s timeout; doing N calls sequentially in the gen_server would block
+snapshot reads and event processing. A `stats_collecting` flag prevents
+overlapping collections. When the spawned process finishes, it sends
+`{stats_collected, Gen, Result}` back, tagged with a generation
+counter.
+
+A safety timeout (`stats_collection_timeout`) fires at `2 * bridge_stats_interval`
+to reset the collecting flag if the worker dies without sending a result.
+The timeout message includes the same generation counter, so stale
+timeouts from previous cycles are ignored. Stats results from
+timed-out generations are also discarded to prevent overwriting
+fresher data from the current generation.
 
 **handle_info(poll_handoff)** / **handle_info(poll_aae)** -- Polls
 handoff and AAE status via the gateway module. Same diff-then-publish
@@ -582,13 +599,18 @@ The WebSocket handler runs its own `check_security/1` in `init/2`
 before the protocol upgrade. It calls
 `riak_admin_api_request:normalize_headers/1` to extract standard
 header metadata, then calls `riak_admin_api_request:ensure_security/2`
-with a fixed context (`method => <<"GET">>`, `route => <<"/api/stream/events">>`,
+with a fixed context (`method => <<"UPGRADE">>`, `route => <<"/api/stream/events">>`,
 `op => admin`).
+
+Because the method is `UPGRADE` (not `GET`), origin validation treats
+WebSocket upgrades as unsafe methods -- if `security_trusted_origins`
+is configured, the `Origin` header must be present and match a trusted
+origin.
 
 Checks enforced:
 
 1. TLS enforcement (`security_require_tls`)
-2. Origin validation (`security_trusted_origins`)
+2. Origin validation (`security_trusted_origins`) -- uses method `UPGRADE` for the origin check, so Origin header is required when trusted_origins is configured
 3. Authentication (`authn_hook`)
 4. Authorization (`authz_hook`)
 
