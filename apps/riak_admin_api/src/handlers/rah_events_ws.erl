@@ -28,19 +28,27 @@
 %%% ============================================================
 
 %% @doc HTTP upgrade to WebSocket.
-%% Security is wired in Step 4; this skeleton accepts all upgrades.
+%% Runs the same security pipeline as admin handlers before upgrading.
+%% Failed auth returns a normal HTTP error (no upgrade).
 -spec init(cowboy_req:req(), term()) ->
-    {cowboy_websocket, cowboy_req:req(), map()}.
-init(Req, _Opts) ->
-    IdleTimeout = application:get_env(
-        riak_admin_api, ws_idle_timeout, 300000),
-    MaxFrameSize = application:get_env(
-        riak_admin_api, ws_max_frame_size, 65536),
-    WsOpts = #{
-        idle_timeout => IdleTimeout,
-        max_frame_size => MaxFrameSize
-    },
-    {cowboy_websocket, Req, #{subscriptions => []}, WsOpts}.
+    {cowboy_websocket, cowboy_req:req(), map()} |
+    {ok, cowboy_req:req(), term()}.
+init(Req, Opts) ->
+    case check_security(Req) of
+        ok ->
+            IdleTimeout = application:get_env(
+                riak_admin_api, ws_idle_timeout, 300000),
+            MaxFrameSize = application:get_env(
+                riak_admin_api, ws_max_frame_size, 65536),
+            WsOpts = #{
+                idle_timeout => IdleTimeout,
+                max_frame_size => MaxFrameSize
+            },
+            {cowboy_websocket, Req, #{subscriptions => []}, WsOpts};
+        {error, ErrorMap} ->
+            Req1 = riak_admin_api_response:reply_error_map(ErrorMap, Req),
+            {ok, Req1, Opts}
+    end.
 
 %% @doc Called after the WebSocket handshake completes.
 %% Join the syn cluster_events group and send the connected frame.
@@ -71,20 +79,33 @@ websocket_handle(_Other, State) ->
     {ok, State}.
 
 %% @doc Handle Erlang messages (syn events, etc).
+%% Includes backpressure: if the message queue exceeds the configured
+%% limit, the event is dropped and a warning frame is sent instead.
 -spec websocket_info(term(), map()) ->
     {[{text, binary()}], map()} | {ok, map()}.
 websocket_info({event, Node, {Topic, Data}},
                #{subscriptions := Subs} = State) ->
     case lists:member(Topic, Subs) of
         true ->
-            Frame = jsx:encode(#{
-                type => <<"event">>,
-                topic => Topic,
-                node => Node,
-                data => Data,
-                timestamp => erlang:system_time(second)
-            }),
-            {[{text, Frame}], State};
+            case check_backpressure() of
+                ok ->
+                    Frame = jsx:encode(#{
+                        type => <<"event">>,
+                        topic => Topic,
+                        node => Node,
+                        data => Data,
+                        timestamp => erlang:system_time(second)
+                    }),
+                    {[{text, Frame}], State};
+                {backpressure, QueueLen} ->
+                    Frame = jsx:encode(#{
+                        type => <<"backpressure">>,
+                        message_queue_len => QueueLen,
+                        dropped_topic => Topic,
+                        timestamp => erlang:system_time(second)
+                    }),
+                    {[{text, Frame}], State}
+            end;
         false ->
             {ok, State}
     end;
@@ -164,6 +185,49 @@ snapshot_frames(Topics) ->
                 _:_ -> false
             end
         end, Topics).
+
+check_security(Req) ->
+    Opts = #{
+        require_tls => application:get_env(
+            riak_admin_api, security_require_tls, false),
+        trust_proxy_headers => application:get_env(
+            riak_admin_api, security_trust_proxy_headers, false),
+        trusted_origins => application:get_env(
+            riak_admin_api, security_trusted_origins, []),
+        require_auth => application:get_env(
+            riak_admin_api, security_require_auth, false),
+        authn_fun => application:get_env(
+            riak_admin_api, authn_hook, undefined),
+        authz_fun => application:get_env(
+            riak_admin_api, authz_hook, undefined)
+    },
+    Headers = case Req of
+        #{headers := H} when is_map(H) -> H;
+        _ -> #{}
+    end,
+    {ok, HeaderMeta} = riak_admin_api_request:normalize_headers(Headers),
+    RequestId = maps:get(request_id, HeaderMeta),
+    NormHeaders = maps:remove(request_id, HeaderMeta),
+    Context = #{
+        method => <<"GET">>,
+        headers => NormHeaders,
+        route => <<"/api/stream/events">>,
+        op => admin
+    },
+    case riak_admin_api_request:ensure_security(Context, Opts) of
+        ok -> ok;
+        {error, Error} -> {error, Error#{request_id => RequestId}}
+    end.
+
+check_backpressure() ->
+    Limit = application:get_env(
+        riak_admin_api, ws_backpressure_limit, 1000),
+    case process_info(self(), message_queue_len) of
+        {message_queue_len, Len} when Len > Limit ->
+            {backpressure, Len};
+        _ ->
+            ok
+    end.
 
 join_events_group() ->
     try
@@ -301,5 +365,49 @@ websocket_info_filters_by_subscription_test_() ->
              ?assertEqual({ok, State}, Result)
          end}
     ]}.
+
+check_backpressure_test_() ->
+    {"backpressure check works under normal conditions",
+     fun() ->
+         %% Under normal test conditions, queue is short
+         ?assertEqual(ok, check_backpressure())
+     end}.
+
+check_backpressure_with_low_limit_test_() ->
+    {"backpressure triggers when limit is very low",
+     fun() ->
+         %% Set limit to 0 so any queue triggers backpressure
+         application:set_env(riak_admin_api, ws_backpressure_limit, 0),
+         %% Send ourselves a message to ensure queue > 0
+         self() ! test_message,
+         Result = check_backpressure(),
+         %% Clean up
+         receive test_message -> ok after 0 -> ok end,
+         application:unset_env(riak_admin_api, ws_backpressure_limit),
+         ?assertMatch({backpressure, _}, Result)
+     end}.
+
+check_security_no_auth_required_test_() ->
+    {"security check passes when auth is not required",
+     fun() ->
+         application:set_env(riak_admin_api, security_require_auth, false),
+         application:set_env(riak_admin_api, security_require_tls, false),
+         Req = #{headers => #{}},
+         ?assertEqual(ok, check_security(Req)),
+         application:unset_env(riak_admin_api, security_require_auth),
+         application:unset_env(riak_admin_api, security_require_tls)
+     end}.
+
+check_security_rejects_when_auth_required_no_hooks_test_() ->
+    {"security check rejects when auth is required but no hooks configured",
+     fun() ->
+         application:set_env(riak_admin_api, security_require_auth, true),
+         application:unset_env(riak_admin_api, authn_hook),
+         application:unset_env(riak_admin_api, authz_hook),
+         Req = #{headers => #{}},
+         Result = check_security(Req),
+         application:set_env(riak_admin_api, security_require_auth, false),
+         ?assertMatch({error, _}, Result)
+     end}.
 
 -endif.
