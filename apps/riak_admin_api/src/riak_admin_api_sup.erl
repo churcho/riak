@@ -2,8 +2,9 @@
 %%% @doc
 %%% Top-level supervisor for riak_admin_api.
 %%%
-%%% Children (S1 revised):
+%%% Children (S1 revised, M8 updated):
 %%% - riak_admin_http: Cowboy listener (ranch child spec)
+%%% - riak_admin_api_event_bridge: event bridge for WS streaming
 %%% - riak_admin_api_coordinator: syn registration lifecycle
 %%%
 %%% Restart strategy: rest_for_one — if the listener crashes, the
@@ -34,10 +35,18 @@ start_link(ListenerSpec) ->
 %%
 %% Children (in start order):
 %% 1. riak_admin_http: Cowboy listener (must start first)
-%% 2. riak_admin_api_coordinator: syn registration lifecycle
+%% 2. riak_admin_api_event_bridge: event bridge (before coordinator)
+%% 3. riak_admin_api_coordinator: syn registration lifecycle
 -spec init([supervisor:child_spec()]) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([ListenerSpec]) ->
+    EventBridge = #{
+        id => riak_admin_api_event_bridge,
+        start => {riak_admin_api_event_bridge, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
+    },
     Coordinator = #{
         id => riak_admin_api_coordinator,
         start => {riak_admin_api_coordinator, start_link, []},
@@ -46,4 +55,4 @@ init([ListenerSpec]) ->
         type => worker
     },
     {ok, {#{strategy => rest_for_one, intensity => 5, period => 10},
-          [ListenerSpec, Coordinator]}}.
+          [ListenerSpec, EventBridge, Coordinator]}}.
