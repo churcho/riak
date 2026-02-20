@@ -16,6 +16,7 @@
     error_reply/5,
     reply_error_map/2,
     error_payload/4,
+    security_headers/0,
     compat_headers/1,
     cors_headers/2,
     telemetry_tags/3,
@@ -109,9 +110,18 @@ error_payload(StatusCode, ErrorCode, Reason, RequestId) ->
         request_id => RequestId
     }.
 
+-spec security_headers() -> map().
+security_headers() ->
+    #{
+        <<"x-content-type-options">> => <<"nosniff">>,
+        <<"x-frame-options">> => <<"DENY">>,
+        <<"cache-control">> => <<"no-store">>,
+        <<"content-security-policy">> => <<"default-src 'none'; frame-ancestors 'none'">>
+    }.
+
 -spec compat_headers(map()) -> map().
 compat_headers(Opts) ->
-    Headers0 = maybe_put(<<"x-request-id">>, maps:get(request_id, Opts, undefined), #{}),
+    Headers0 = maybe_put(<<"x-request-id">>, maps:get(request_id, Opts, undefined), security_headers()),
     Headers1 = maybe_put(<<"x-riak-vclock">>, maps:get(vclock, Opts, undefined), Headers0),
     Headers2 = maybe_put(<<"etag">>, maps:get(etag, Opts, undefined), Headers1),
     Headers3 = maybe_put(<<"last-modified">>, maps:get(last_modified, Opts, undefined), Headers2),
@@ -149,7 +159,8 @@ cors_headers(Opts, _BaseHeaders) ->
                         <<"access-control-expose-headers">> =>
                             <<"X-Request-Id, X-Riak-Vclock, ETag, "
                               "Last-Modified, Link, Location">>,
-                        <<"access-control-max-age">> => <<"3600">>
+                        <<"access-control-max-age">> => <<"3600">>,
+                        <<"vary">> => <<"Origin">>
                     };
                 false ->
                     #{}

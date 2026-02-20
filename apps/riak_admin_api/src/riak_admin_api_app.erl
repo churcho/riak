@@ -209,6 +209,21 @@ audit_security_posture() ->
         _ ->
             ok
     end,
+
+    %% Warn about MapReduce with no auth
+    MapredEnabled = application:get_env(
+        riak_admin_api, mapred_backend_enabled, true),
+    CutoverDefault = application:get_env(
+        riak_admin_api, cowboy_cutover_default_mode, disabled),
+    case {MapredEnabled, CutoverDefault, HasAuthn} of
+        {true, Mode, false} when Mode =:= enabled; Mode =:= <<"enabled">> ->
+            logger:warning("[riak_admin] SECURITY: MapReduce backend is "
+                           "enabled without authentication. MapReduce allows "
+                           "arbitrary Erlang code execution on cluster nodes. "
+                           "Configure authn_hook or disable MapReduce.");
+        _ ->
+            ok
+    end,
     ok.
 
 %% @doc Resolve the admin API HTTP port for this node.

@@ -30,19 +30,26 @@ handle_request(Req) ->
 fetch_stats(NodeBin, Req) ->
     try binary_to_existing_atom(NodeBin, utf8) of
         Node ->
-            case riak_admin_api_riak:node_stats(Node) of
-                {ok, Data} ->
-                    riak_admin_api_handler:json_reply(200, Data, Req);
-                {error, {unreachable, _}} ->
-                    riak_admin_api_handler:error_reply(503,
-                        <<"node_unreachable">>,
-                        <<"Node is unreachable">>, Req);
-                {error, Reason} ->
-                    logger:warning("[riak_admin] node_stats error: ~p",
-                                   [Reason]),
-                    riak_admin_api_handler:error_reply(500,
-                        <<"backend_error">>,
-                        <<"Failed to retrieve node stats">>, Req)
+            case lists:member(Node, [node() | erlang:nodes()]) of
+                false ->
+                    riak_admin_api_handler:error_reply(404,
+                        <<"unknown_node">>,
+                        <<"Node is not a current cluster member">>, Req);
+                true ->
+                    case riak_admin_api_riak:node_stats(Node) of
+                        {ok, Data} ->
+                            riak_admin_api_handler:json_reply(200, Data, Req);
+                        {error, {unreachable, _}} ->
+                            riak_admin_api_handler:error_reply(503,
+                                <<"node_unreachable">>,
+                                <<"Node is unreachable">>, Req);
+                        {error, Reason} ->
+                            logger:warning("[riak_admin] node_stats error: ~p",
+                                           [Reason]),
+                            riak_admin_api_handler:error_reply(500,
+                                <<"backend_error">>,
+                                <<"Failed to retrieve node stats">>, Req)
+                    end
             end
     catch
         error:badarg ->

@@ -118,6 +118,12 @@ handle_info(poll_aae, State) ->
     State1 = handle_poll_aae(State),
     schedule_poll(poll_aae, bridge_aae_interval()),
     {noreply, State1};
+handle_info(stats_collection_timeout, #{stats_collecting := true} = State) ->
+    logger:debug("[riak_admin] Stats collection timed out, resetting flag"),
+    {noreply, State#{stats_collecting := false}};
+handle_info(stats_collection_timeout, State) ->
+    %% Already completed, ignore stale timeout
+    {noreply, State};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -174,10 +180,12 @@ maybe_start_stats_collection(#{stats_collecting := true} = State) ->
     State;
 maybe_start_stats_collection(State) ->
     Bridge = self(),
-    spawn_link(fun() ->
+    spawn(fun() ->
         Result = collect_all_node_stats(),
         Bridge ! {stats_collected, Result}
     end),
+    %% Safety: reset flag if worker dies without sending result
+    erlang:send_after(bridge_stats_interval() * 2, self(), stats_collection_timeout),
     State#{stats_collecting := true}.
 
 handle_poll_handoff(State) ->

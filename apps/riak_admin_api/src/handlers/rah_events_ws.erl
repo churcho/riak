@@ -190,8 +190,9 @@ dispatch_action(#{<<"action">> := <<"unsubscribe">>,
 
 dispatch_action(#{<<"action">> := Action}, State)
   when is_binary(Action) ->
+    Safe = sanitize_for_display(Action),
     Frame = error_frame(<<"unknown_action">>,
-                        <<"Unknown action: ", Action/binary>>),
+                        <<"Unknown action: ", Safe/binary>>),
     {[{text, Frame}], State};
 
 dispatch_action(_, State) ->
@@ -202,6 +203,20 @@ dispatch_action(_, State) ->
 %%% ============================================================
 %%% Internal helpers
 %%% ============================================================
+
+%% @private Sanitize a client-supplied value for inclusion in error messages.
+%% Truncates to 64 bytes and strips non-alphanumeric characters to prevent
+%% XSS if a dashboard renders the error reason as HTML.
+sanitize_for_display(Value) when is_binary(Value) ->
+    Truncated = case byte_size(Value) > 64 of
+        true -> binary:part(Value, 0, 64);
+        false -> Value
+    end,
+    << <<C>> || <<C>> <= Truncated,
+        (C >= $a andalso C =< $z) orelse
+        (C >= $A andalso C =< $Z) orelse
+        (C >= $0 andalso C =< $9) orelse
+        C =:= $_ orelse C =:= $- >>.
 
 snapshot_frames(Topics) ->
     lists:filtermap(
@@ -247,7 +262,7 @@ check_security(Req) ->
     RequestId = maps:get(request_id, HeaderMeta),
     NormHeaders = maps:remove(request_id, HeaderMeta),
     Context = #{
-        method => <<"GET">>,
+        method => <<"UPGRADE">>,
         headers => NormHeaders,
         route => <<"/api/stream/events">>,
         op => admin

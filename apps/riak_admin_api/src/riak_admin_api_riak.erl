@@ -639,6 +639,11 @@ parse_charset([Param | Rest]) ->
 trim_binary(Bin) when is_binary(Bin) ->
     iolist_to_binary(string:trim(Bin)).
 
+accept_doc_value(<<"application/x-erlang-binary">>, Body)
+  when byte_size(Body) > 1048576 ->
+    %% Skip ETF deserialization for bodies > 1MB to prevent
+    %% memory amplification from deeply nested terms.
+    Body;
 accept_doc_value(<<"application/x-erlang-binary">>, Body) ->
     try binary_to_term(Body, [safe])
     catch
@@ -1851,6 +1856,13 @@ index_terms(Context) ->
 
 validate_index_term_regex(undefined, _IndexQuery) ->
     ok;
+validate_index_term_regex(TermRegex, _IndexQuery)
+  when byte_size(TermRegex) > 256 ->
+    {error, #{
+        status => 400,
+        code => <<"invalid_query">>,
+        reason => <<"term_regex exceeds maximum length (256 bytes)">>
+    }};
 validate_index_term_regex(TermRegex, IndexQuery) ->
     case re:compile(TermRegex) of
         {ok, _Compiled} ->

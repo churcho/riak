@@ -21,18 +21,34 @@
 %% and dispatches to the appropriate operation handler.
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, RouteOpts) ->
-    Opts = request_opts(RouteOpts),
-    case normalize_request(Req0, Opts) of
-        {ok, Context, Req1} ->
-            %% S5 (M-4): Thread trusted_origins into reply opts for CORS
-            CorsExtra = #{trusted_origins =>
-                maps:get(trusted_origins, Opts, [])},
-            ReplyOpts = response_opts(Context, CorsExtra),
-            Req2 = dispatch(Context, Req1, Opts, ReplyOpts),
-            {ok, Req2, RouteOpts};
-        {error, Error, Req1} ->
-            Req2 = riak_admin_api_response:reply_error_map(Error, Req1),
-            {ok, Req2, RouteOpts}
+    case cowboy_req:method(Req0) of
+        <<"OPTIONS">> ->
+            Opts = request_opts(RouteOpts),
+            ReplyOpts0 = req_response_opts(Req0),
+            Headers = case Req0 of
+                #{headers := H} when is_map(H) -> H;
+                _ -> #{}
+            end,
+            ReplyOpts = ReplyOpts0#{
+                trusted_origins => maps:get(trusted_origins, Opts, []),
+                request_origin => maps:get(<<"origin">>, Headers, undefined)
+            },
+            Req1 = riak_admin_api_response:raw_reply(204, <<>>, Req0, ReplyOpts, #{}),
+            {ok, Req1, RouteOpts};
+        _ ->
+            Opts = request_opts(RouteOpts),
+            case normalize_request(Req0, Opts) of
+                {ok, Context, Req1} ->
+                    %% S5 (M-4): Thread trusted_origins into reply opts for CORS
+                    CorsExtra = #{trusted_origins =>
+                        maps:get(trusted_origins, Opts, [])},
+                    ReplyOpts = response_opts(Context, CorsExtra),
+                    Req2 = dispatch(Context, Req1, Opts, ReplyOpts),
+                    {ok, Req2, RouteOpts};
+                {error, Error, Req1} ->
+                    Req2 = riak_admin_api_response:reply_error_map(Error, Req1),
+                    {ok, Req2, RouteOpts}
+            end
     end.
 
 %% @doc Send a JSON response with standard headers and CORS.
