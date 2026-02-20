@@ -50,11 +50,11 @@ bucket_props_invalid_json_payload_returns_400_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => buckets,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         unexpected_bucket_backend_call ->
@@ -89,11 +89,11 @@ bucket_type_props_invalid_json_payload_returns_400_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => types,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         unexpected_bucket_backend_call ->
@@ -118,12 +118,12 @@ bucket_props_permission_denied_returns_403_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => buckets,
             authz_fun => fun(_Ctx) -> {deny, 403, <<"forbidden">>, <<"blocked">>} end,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun assert_no_bucket_backend/3
-        }),
+        })),
 
     {Status, _Headers, Body} = receive_response_for_stream(StreamID),
     ?assertEqual(403, Status),
@@ -141,11 +141,11 @@ riak_bucket_props_method_not_allowed_contract_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => riak,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun assert_no_bucket_backend/3
-        }),
+        })),
 
     {Status, Headers, Body} = receive_response_for_stream(StreamID),
     ?assertEqual(405, Status),
@@ -180,11 +180,11 @@ assert_bucket_backend_case(
     end,
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req,
-        #{
+        route_opts(#{
             route_family => route_family(Path),
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         {bucket_backend_call, Action, Context, Input} ->
@@ -260,6 +260,9 @@ assert_no_bucket_backend(_Action, _Context, _Input) ->
 route_family(<<"/riak", _/binary>>) -> riak;
 route_family(<<"/buckets", _/binary>>) -> buckets;
 route_family(<<"/types", _/binary>>) -> types.
+
+route_opts(Opts) ->
+    Opts#{cutover_default_mode => enabled}.
 
 receive_response_for_stream(StreamID) ->
     Pid = self(),

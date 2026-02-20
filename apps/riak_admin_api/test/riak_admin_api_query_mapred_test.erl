@@ -39,11 +39,11 @@ query_method_not_allowed_allow_header_contract_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => buckets,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun assert_no_bucket_backend/3
-        }),
+        })),
 
     {Status, Headers, Body} = receive_response_for_stream(StreamID),
     ?assertEqual(405, Status),
@@ -76,11 +76,11 @@ query_invalid_json_payload_returns_400_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => buckets,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         unexpected_bucket_backend_call ->
@@ -115,11 +115,11 @@ mapred_invalid_json_payload_returns_400_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => mapred,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         unexpected_bucket_backend_call ->
@@ -145,7 +145,7 @@ mapred_timeout_error_uses_cowboy_error_envelope_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => mapred,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun(_Action, _Context, _Input) ->
@@ -155,7 +155,7 @@ mapred_timeout_error_uses_cowboy_error_envelope_test() ->
                     reason => <<"timeout">>
                 }}
             end
-        }),
+        })),
 
     {Status, _Headers, Body} = receive_response_for_stream(StreamID),
     ?assertEqual(500, Status),
@@ -182,11 +182,11 @@ assert_bucket_backend_case(
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => route_family(Path),
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         {bucket_backend_call, Action, Context, Input} ->
@@ -220,13 +220,13 @@ assert_mapred_usage_method(Method) ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => mapred,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun(_Action, _Context, _Input) ->
                 Parent ! unexpected_bucket_backend_call
             end
-        }),
+        })),
 
     receive
         unexpected_bucket_backend_call ->
@@ -290,6 +290,9 @@ route_family(<<"/mapred", _/binary>>) -> mapred;
 route_family(<<"/riak", _/binary>>) -> riak;
 route_family(<<"/buckets", _/binary>>) -> buckets;
 route_family(<<"/types", _/binary>>) -> types.
+
+route_opts(Opts) ->
+    Opts#{cutover_default_mode => enabled}.
 
 receive_response_for_stream(StreamID) ->
     Pid = self(),

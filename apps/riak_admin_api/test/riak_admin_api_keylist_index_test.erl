@@ -64,11 +64,11 @@ index_method_not_allowed_allow_header_contract_test() ->
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => buckets,
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => fun assert_no_bucket_backend/3
-        }),
+        })),
 
     {Status, Headers, Body} = receive_response_for_stream(StreamID),
     ?assertEqual(405, Status),
@@ -95,11 +95,11 @@ assert_bucket_backend_case(
     },
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{
+        route_opts(#{
             route_family => route_family(Path),
             object_backend => fun assert_no_object_backend/3,
             bucket_backend => BucketBackend
-        }),
+        })),
 
     receive
         {bucket_backend_call, Action, Context, Input} ->
@@ -182,6 +182,9 @@ assert_no_bucket_backend(_Action, _Context, _Input) ->
 route_family(<<"/riak", _/binary>>) -> riak;
 route_family(<<"/buckets", _/binary>>) -> buckets;
 route_family(<<"/types", _/binary>>) -> types.
+
+route_opts(Opts) ->
+    Opts#{cutover_default_mode => enabled}.
 
 receive_response_for_stream(StreamID) ->
     Pid = self(),

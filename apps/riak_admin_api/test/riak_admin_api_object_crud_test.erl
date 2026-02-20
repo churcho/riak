@@ -30,7 +30,7 @@ object_get_uses_backend_and_compat_headers_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, Body} = receive_response_for_stream(get_stream),
     ?assertEqual(200, Status),
@@ -61,7 +61,7 @@ object_head_omits_body_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, Body} = receive_response_for_stream(head_stream),
     ?assertEqual(200, Status),
@@ -93,7 +93,7 @@ object_create_post_sets_location_header_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, _Body} = receive_response_for_stream(create_stream),
     ?assertEqual(201, Status),
@@ -121,7 +121,7 @@ object_put_forwards_conditional_headers_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     receive
         {object_put_input, Input} ->
@@ -157,7 +157,7 @@ object_get_supports_sibling_response_form_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, Body} = receive_response_for_stream(siblings_stream),
     ?assertEqual(300, Status),
@@ -195,7 +195,7 @@ object_item_method_not_allowed_allow_header_contract_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, Body} = receive_response_for_stream(item_405_stream),
     ?assertEqual(405, Status),
@@ -217,7 +217,7 @@ keys_method_not_allowed_allow_header_contract_test() ->
 
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req0,
-        #{route_family => buckets, object_backend => Backend}),
+        route_opts(#{route_family => buckets, object_backend => Backend})),
 
     {Status, Headers, Body} = receive_response_for_stream(keys_405_stream),
     ?assertEqual(405, Status),
@@ -251,7 +251,7 @@ assert_backend_action_case(
     end,
     {ok, _Req1, _State} = riak_admin_api_handler:init(
         Req,
-        #{route_family => route_family(Path), object_backend => Backend}),
+        route_opts(#{route_family => route_family(Path), object_backend => Backend})),
 
     receive
         {backend_call, Action, Context, Input} ->
@@ -273,6 +273,9 @@ assert_backend_action_case(
 route_family(<<"/riak", _/binary>>) -> riak;
 route_family(<<"/buckets", _/binary>>) -> buckets;
 route_family(<<"/types", _/binary>>) -> types.
+
+route_opts(Opts) ->
+    Opts#{cutover_default_mode => enabled}.
 
 receive_response_for_stream(StreamID) ->
     Pid = self(),
