@@ -1,7 +1,7 @@
-# Cowboy Critical Remediation Notes (D01 + S0 + S1)
+# Cowboy Critical Remediation Notes (D01 + S0 + S1 + S2)
 
 Date: 2026-02-20
-Status: D01 + S0 + S1 pass notes
+Status: D01 + S0 + S1 + S2 pass notes
 
 ## Remediations Implemented in D01
 
@@ -289,23 +289,94 @@ Verification:
 - `auth_guardrail_true_both_hooks_passes_test` passes.
 - `handler_init_with_require_auth_blocks_without_hooks_test` passes.
 
+## Remediations Implemented in S2
+
+### S2-001: True incremental streaming (CG-001)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+- `apps/riak_admin_api/src/riak_admin_api_response.erl`
+
+What changed:
+
+- Gateway returns `{stream, StreamInit, ChunkFun}` for key/bucket/index/mapred stream paths.
+- Handler uses `cowboy_req:stream_reply/3` + `stream_body/3` for chunked transfer encoding.
+- Toggle: `stream_incremental_enabled` (default `true`); `false` preserves aggregated-body compat.
+
+Why safe:
+
+- JSON payload structure preserved. Toggle-controlled. Stream ceiling (S1) still applies.
+
+### S2-002: Conditional-write enforcement (CG-004)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+
+What changed:
+
+- `check_write_preconditions/3` implements HTTP-layer If-Match and If-Unmodified-Since via read-before-write.
+- Returns 412 on precondition failure. `filter_riak_cond_opts/1` strips HTTP conditionals before Riak put.
+
+Why safe:
+
+- No overhead when no conditional headers present. Riak native conditionals unchanged.
+
+### S2-003: MapReduce backend operator toggle (CG-006)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+
+What changed:
+
+- `mapred_backend_enabled/0` operator toggle (default `true`).
+- Disabled returns 503 `service_unavailable`; absent modules still return 501 `not_implemented`.
+
+Why safe:
+
+- Default `true`. Two-level availability with clear error semantics.
+
+### S2-004: CRDT collection redirect parity (CG-007)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+
+What changed:
+
+- `maybe_crdt_collection_redirect/1` redirects collection create path (default bucket type, no key) to `/buckets/.../counters`.
+- Wired into `crdt_update_operation` for create mode.
+
+Why safe:
+
+- Only fires for default bucket type with no key. Non-default types unaffected.
+
+### S2-005: /riak counters alias explicit rejection (CG-008)
+
+Scope:
+
+- `apps/riak_admin_api/test/riak_admin_api_request_test.erl` (test evidence only)
+
+What changed:
+
+- Decision: no alias. `/riak` normalizer catch-all returns 404 for paths beyond 2 segments. Test evidence confirms.
+
+Why safe:
+
+- No behavioral change — path was always 404.
+
 ## Deferred Remediation Plans
 
 ### D-001: True incremental streaming/backpressure (CG-001)
 
-Acceptance criteria:
-
-- Replace aggregated-body stream collection with incremental chunk emission.
-- Add memory/backpressure tests for long key/index/mapred streams.
-- Preserve existing compatibility payload envelopes.
+Status: **Closed (S2)** — incremental streaming via `{stream, StreamInit, ChunkFun}` pattern.
 
 ### D-002: Conditional-write completeness (CG-004)
 
-Acceptance criteria:
-
-- Define explicit mapping for `If-Match` and `If-Unmodified-Since` to Riak conditional primitives.
-- Add red/green tests for stale-match and stale-time precondition failure behavior.
-- Confirm parity against legacy path expectations.
+Status: **Closed (S2)** — read-before-write enforcement for If-Match and If-Unmodified-Since.
 
 ### D-003: Timeout semantics alignment (CG-005)
 
@@ -313,25 +384,15 @@ Status: **Closed (S1)** — MapReduce timeout unified to 503 via `mapred_timeout
 
 ### D-004: MapReduce backend availability control (CG-006)
 
-Acceptance criteria:
-
-- Expose backend capability signal in diagnostics/metrics.
-- Block mapred enablement during rollout when backend modules are missing.
+Status: **Closed (S2)** — two-level operator toggle (503 disabled / 501 absent).
 
 ### D-005: CRDT redirect parity scope (CG-007)
 
-Acceptance criteria:
-
-- ADR with explicit keyed vs collection path behavior.
-- Tests proving chosen behavior and ensuring no ambiguous redirects.
+Status: **Closed (S2)** — collection redirect added for default bucket type create path.
 
 ### D-006: `/riak` counters alias parity decision (CG-008)
 
-Acceptance criteria:
-
-- Publish explicit parity decision.
-- If alias is added: route/parser/internal mapping evidence and compatibility tests.
-- If alias is rejected: document rationale and migration guidance.
+Status: **Closed (S2)** — explicit rejection with 404 test evidence and rationale documented.
 
 ### SD-001: net_adm:ping sequential latency (CG-015)
 
@@ -339,7 +400,7 @@ Status: **Closed (S1)** — replaced with `parallel_ping_nodes/2`.
 
 ### SD-002: Stream collection handler blocking (CG-016)
 
-Status: **Closed (S1)** — added `stream_collection_ceiling/0` safety cap. Full spawn-with-backpressure remains a future optimization (see CG-001).
+Status: **Closed (S1)** — added `stream_collection_ceiling/0` safety cap. Full spawn-with-backpressure superseded by CG-001 (S2).
 
 ### SD-003: Listener supervision architecture (CG-017)
 

@@ -95,3 +95,31 @@ Branch: `feature/cowboy-s1-resilience-perf`
 
 Command: `./rebar3 eunit --module=riak_admin_api_app_test,riak_admin_api_riak_test,riak_admin_api_request_test,riak_admin_api_handler_test`
 Result: All 151 tests passed.
+
+---
+
+## S2 Deferred Gap Closure Addendum
+
+Date: 2026-02-20
+Branch: `feature/cowboy-s2-streaming-conditions-parity`
+
+### S2 Performance Impact Assessment
+
+| Change | Expected Impact | Risk |
+|---|---|---|
+| Incremental streaming (CG-001) | Positive — reduces peak memory: stream payloads emitted incrementally instead of fully buffered; handler latency spread over chunk emissions rather than single large write | Low-Medium (chunked encoding adds per-chunk framing overhead; negligible for typical payload sizes) |
+| Conditional writes read-before-write (CG-004) | Negative (bounded) — adds one GET before PUT when If-Match or If-Unmodified-Since present; no overhead when headers absent | Low (only fires when conditional headers present; read is local to the coordinator node) |
+| MapReduce backend toggle (CG-006) | Negligible — single app env read added before mapred dispatch | Low |
+| CRDT collection redirect (CG-007) | Negligible — single map pattern match added in create path | Low |
+| /riak counters alias (CG-008) | None — no code change | None |
+
+### S2 Streaming Latency Notes
+
+- Incremental streaming shifts latency profile from "buffer-then-respond" to "first-byte-fast, tail-latency-distributed." Clients see first response byte sooner but total transfer duration may be similar or slightly longer due to per-chunk framing.
+- For very large key lists (>100k keys), memory improvement is significant: peak RSS bounded by chunk buffer size rather than full collection size.
+- Backpressure depends on Cowboy/Ranch TCP buffer management; the gateway does not implement explicit flow control beyond the stream ceiling timer.
+
+### S2 Verification
+
+Command: `./rebar3 eunit apps=riak_admin_api`
+Result: All 261 tests passed.

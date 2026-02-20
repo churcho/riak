@@ -9,7 +9,10 @@
     reply_error_map/2,
     error_payload/4,
     compat_headers/1,
-    telemetry_tags/3
+    telemetry_tags/3,
+    %% S2 (CG-001): Incremental streaming helpers
+    stream_reply_init/4,
+    stream_reply_body/3
 ]).
 
 -define(JSON_CONTENT_TYPE, <<"application/json; charset=utf-8">>).
@@ -111,6 +114,26 @@ telemetry_tags(Context, Status, DurationUs) ->
         status => Status,
         duration_us => DurationUs
     }.
+
+%% @doc Start a chunked/streaming HTTP response.
+%%
+%% S2 (CG-001): Wraps cowboy_req:stream_reply/3 for incremental
+%% streaming of large response bodies (key lists, index results,
+%% mapreduce chunks). The caller must follow up with stream_reply_body/3
+%% calls and a final `fin' chunk.
+-spec stream_reply_init(non_neg_integer(), cowboy_req:req(), map(), map()) ->
+    cowboy_req:req().
+stream_reply_init(StatusCode, Req, Opts, ExtraHeaders) ->
+    Headers = maps:merge(compat_headers(Opts), ExtraHeaders),
+    cowboy_req:stream_reply(StatusCode, Headers, Req).
+
+%% @doc Send a chunk of data in an active streaming response.
+%%
+%% S2 (CG-001): Wraps cowboy_req:stream_body/3. IsFin must be
+%% `fin' for the last chunk and `nofin' for intermediate chunks.
+-spec stream_reply_body(iodata(), fin | nofin, cowboy_req:req()) -> ok.
+stream_reply_body(Data, IsFin, Req) ->
+    cowboy_req:stream_body(Data, IsFin, Req).
 
 maybe_log_telemetry(Opts, StatusCode, StartUs) ->
     case maps:get(telemetry_context, Opts, undefined) of

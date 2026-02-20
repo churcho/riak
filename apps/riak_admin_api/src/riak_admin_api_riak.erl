@@ -93,7 +93,12 @@
     parallel_ping_nodes/2,
     mapred_timeout_error_map/0,
     list_keys_error_mode/0,
-    stream_collection_ceiling/0
+    stream_collection_ceiling/0,
+    %% S2 test exports
+    stream_incremental_enabled/0,
+    mapred_backend_enabled/0,
+    check_write_preconditions/3,
+    maybe_crdt_collection_redirect/1
 ]).
 -endif.
 
@@ -306,20 +311,28 @@ object_store(Mode, Context0, Input, Client) ->
         {error, Error} ->
             {error, Error};
         {ok, Doc, ReturnBody, CondOpts} ->
-            Query = maps:get(query, Context, #{}),
-            BaseOptions = build_object_options(write, Query, []),
-            Options0 = BaseOptions ++ CondOpts,
-            Options = case ReturnBody of
-                true -> [returnbody | Options0];
-                false -> Options0
-            end,
-            case riak_client:put(Doc, Options, Client) of
+            %% S2 (CG-004): Check HTTP-layer conditional preconditions
+            %% (If-Match, If-Unmodified-Since) before attempting write.
+            case check_write_preconditions(Context, CondOpts, Client) of
                 ok ->
-                    {ok, write_no_body_reply(Mode, Context)};
-                {ok, Obj} ->
-                    {ok, write_return_body_reply(Mode, Context, Input, Obj)};
-                {error, Reason} ->
-                    {error, object_error_map(Reason)}
+                    RiakCondOpts = filter_riak_cond_opts(CondOpts),
+                    Query = maps:get(query, Context, #{}),
+                    BaseOptions = build_object_options(write, Query, []),
+                    Options0 = BaseOptions ++ RiakCondOpts,
+                    Options = case ReturnBody of
+                        true -> [returnbody | Options0];
+                        false -> Options0
+                    end,
+                    case riak_client:put(Doc, Options, Client) of
+                        ok ->
+                            {ok, write_no_body_reply(Mode, Context)};
+                        {ok, Obj} ->
+                            {ok, write_return_body_reply(Mode, Context, Input, Obj)};
+                        {error, Reason} ->
+                            {error, object_error_map(Reason)}
+                    end;
+                {error, PrecondError} ->
+                    {error, PrecondError}
             end
     end.
 
@@ -437,12 +450,22 @@ conditional_put_options(Headers) ->
         true -> [{if_none_match, true}];
         false -> []
     end,
+    %% S2 (CG-004): Extract If-Match and If-Unmodified-Since for
+    %% HTTP-layer conditional enforcement (checked before write).
+    Cond1 = case maps:get(<<"if-match">>, Headers, undefined) of
+        undefined -> Cond0;
+        ETag -> [{if_match, strip_etag_quotes(ETag)} | Cond0]
+    end,
+    Cond2 = case maps:get(<<"if-unmodified-since">>, Headers, undefined) of
+        undefined -> Cond1;
+        DateStr -> [{if_unmodified_since, DateStr} | Cond1]
+    end,
     case maps:get(<<"x-riak-if-not-modified">>, Headers, undefined) of
         undefined ->
-            {ok, Cond0};
+            {ok, Cond2};
         VClockB64 ->
             case decode_vclock(VClockB64) of
-                {ok, VClock} -> {ok, [{if_not_modified, VClock} | Cond0]};
+                {ok, VClock} -> {ok, [{if_not_modified, VClock} | Cond2]};
                 {error, _} ->
                     {error, #{
                         status => 400,
@@ -451,6 +474,129 @@ conditional_put_options(Headers) ->
                     }}
             end
     end.
+
+%% S2 (CG-004): Strip quotes from ETag values (HTTP allows "tag" or tag).
+strip_etag_quotes(ETag) when is_binary(ETag) ->
+    case ETag of
+        <<"\"", Rest/binary>> ->
+            case binary:last(Rest) of
+                $\" -> binary:part(Rest, 0, byte_size(Rest) - 1);
+                _ -> ETag
+            end;
+        _ -> ETag
+    end.
+
+%% S2 (CG-004): Check HTTP-layer conditional preconditions before writing.
+%%
+%% If-Match: succeeds only if current object's vtag matches the ETag.
+%% If-Unmodified-Since: succeeds only if object was not modified after date.
+%% These require a read-before-write to check the current state. If no
+%% HTTP-layer conditionals are present, returns ok immediately.
+-spec check_write_preconditions(map(), list(), term()) -> ok | {error, map()}.
+check_write_preconditions(Context, CondOpts, Client) ->
+    IfMatch = proplists:get_value(if_match, CondOpts, undefined),
+    IfUnmodified = proplists:get_value(if_unmodified_since, CondOpts, undefined),
+    case {IfMatch, IfUnmodified} of
+        {undefined, undefined} ->
+            ok;
+        _ ->
+            BucketRef = bucket_ref(Context),
+            Key = maps:get(key, Context, undefined),
+            case riak_client:get(BucketRef, Key,
+                                  [deletedvclock, {return_body, true}], Client) of
+                {ok, Obj} ->
+                    check_if_match(IfMatch, Obj,
+                        fun() -> check_if_unmodified_since(IfUnmodified, Obj) end);
+                {error, notfound} ->
+                    case IfMatch of
+                        undefined -> ok;
+                        <<"*">> ->
+                            {error, #{
+                                status => 412,
+                                code => <<"precondition_failed">>,
+                                reason => <<"If-Match failed: object does not exist">>
+                            }};
+                        _ ->
+                            {error, #{
+                                status => 412,
+                                code => <<"precondition_failed">>,
+                                reason => <<"If-Match failed: object does not exist">>
+                            }}
+                    end;
+                {error, _Reason} ->
+                    ok
+            end
+    end.
+
+check_if_match(undefined, _Obj, Next) ->
+    Next();
+check_if_match(<<"*">>, _Obj, Next) ->
+    Next();
+check_if_match(ExpectedETag, Obj, Next) ->
+    Contents = riak_object:get_contents(Obj),
+    Vtags = [to_bin(riak_object:metadata_fetch(?MD_VTAG, MD))
+             || {MD, _} <- Contents],
+    case lists:member(ExpectedETag, Vtags) of
+        true -> Next();
+        false ->
+            {error, #{
+                status => 412,
+                code => <<"precondition_failed">>,
+                reason => <<"If-Match: ETag does not match current object">>
+            }}
+    end.
+
+check_if_unmodified_since(undefined, _Obj) ->
+    ok;
+check_if_unmodified_since(DateStr, Obj) ->
+    Contents = riak_object:get_contents(Obj),
+    case Contents of
+        [{MD, _} | _] ->
+            LastModified = riak_object:metadata_fetch(?MD_LASTMOD, MD),
+            case parse_http_date(DateStr) of
+                {ok, CondTime} ->
+                    ObjTime = lastmod_to_seconds(LastModified),
+                    case ObjTime > CondTime of
+                        true ->
+                            {error, #{
+                                status => 412,
+                                code => <<"precondition_failed">>,
+                                reason => <<"If-Unmodified-Since: object was modified">>
+                            }};
+                        false ->
+                            ok
+                    end;
+                {error, _} ->
+                    {error, #{
+                        status => 400,
+                        code => <<"invalid_header">>,
+                        reason => <<"Invalid If-Unmodified-Since date format">>
+                    }}
+            end;
+        _ ->
+            ok
+    end.
+
+parse_http_date(DateStr) when is_binary(DateStr) ->
+    try
+        DateTime = httpd_util:convert_request_date(binary_to_list(DateStr)),
+        {ok, calendar:datetime_to_gregorian_seconds(DateTime)}
+    catch
+        _:_ -> {error, bad_date}
+    end.
+
+lastmod_to_seconds({MegaSecs, Secs, _MicroSecs}) ->
+    Epoch = calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}}),
+    Epoch + MegaSecs * 1000000 + Secs;
+lastmod_to_seconds(_) ->
+    0.
+
+%% S2 (CG-004): Remove HTTP-layer conditionals before passing to Riak.
+%% Riak KV only understands if_none_match and if_not_modified.
+filter_riak_cond_opts(CondOpts) ->
+    [{K, V} || {K, V} <- CondOpts,
+               K =/= if_match,
+               K =/= if_unmodified_since].
 
 maybe_set_vclock(Doc, Headers) ->
     case maps:get(<<"x-riak-vclock">>, Headers, undefined) of
@@ -958,8 +1104,21 @@ list_buckets_reply(BucketType, Timeout, Client) ->
 stream_buckets_reply(BucketType, Timeout, Client) ->
     case riak_client:stream_list_buckets(none, Timeout, BucketType, Client) of
         {ok, ReqId} ->
-            Body = collect_stream_buckets(ReqId, [], Timeout),
-            {ok, json_backend_reply(200, Body)};
+            case stream_incremental_enabled() of
+                true ->
+                    %% S2 (CG-001): True incremental streaming
+                    StreamInit = #{
+                        status => 200,
+                        content_type => <<"application/json; charset=utf-8">>
+                    },
+                    ChunkFun = fun(Emit) ->
+                        stream_buckets_chunked(ReqId, Timeout, Emit)
+                    end,
+                    {stream, StreamInit, ChunkFun};
+                false ->
+                    Body = collect_stream_buckets(ReqId, [], Timeout),
+                    {ok, json_backend_reply(200, Body)}
+            end;
         {error, Reason} ->
             {error, bucket_error_map(Reason)}
     end.
@@ -985,6 +1144,32 @@ collect_stream_buckets_loop(ReqId, Acc, Timeout) ->
         logger:warning("[riak_admin] bucket stream timed out after ~Bms ceiling",
                        [Timeout]),
         iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
+    end.
+
+%% S2 (CG-001): Incremental streaming for bucket listing.
+%% Emits each chunk directly instead of accumulating in memory.
+stream_buckets_chunked(ReqId, Timeout, Emit) ->
+    CeilingMs = stream_collection_ceiling(),
+    EffectiveTimeout = erlang:min(Timeout, CeilingMs),
+    stream_buckets_chunked_loop(ReqId, EffectiveTimeout, Emit).
+
+stream_buckets_chunked_loop(ReqId, Timeout, Emit) ->
+    receive
+        {ReqId, done} ->
+            Emit(encode_bucket_list([]), fin);
+        {ReqId, _From, {buckets_stream, Buckets}} ->
+            Emit(encode_bucket_list(Buckets), nofin),
+            stream_buckets_chunked_loop(ReqId, Timeout, Emit);
+        {ReqId, {buckets_stream, Buckets}} ->
+            Emit(encode_bucket_list(Buckets), nofin),
+            stream_buckets_chunked_loop(ReqId, Timeout, Emit);
+        {ReqId, {error, timeout}} ->
+            logger:warning("[riak_admin] bucket stream timed out (backend timeout)"),
+            Emit(encode_bucket_stream_timeout(), fin)
+    after Timeout ->
+        logger:warning("[riak_admin] bucket stream timed out after ~Bms ceiling",
+                       [Timeout]),
+        Emit(encode_bucket_stream_timeout(), fin)
     end.
 
 encode_bucket_list(Buckets) ->
@@ -1069,8 +1254,26 @@ stream_keys_reply(Bucket, Timeout0, BucketPropsJson, Context, Client) ->
                 _ -> <<>>
             end,
             Timeout = key_stream_timeout(Timeout0),
-            Body = iolist_to_binary([FirstChunk, collect_stream_keys(ReqId, [], Timeout)]),
-            {ok, json_backend_reply(200, Body)};
+            case stream_incremental_enabled() of
+                true ->
+                    %% S2 (CG-001): True incremental streaming
+                    StreamInit = #{
+                        status => 200,
+                        content_type => <<"application/json; charset=utf-8">>
+                    },
+                    ChunkFun = fun(Emit) ->
+                        case FirstChunk of
+                            <<>> -> ok;
+                            _ -> Emit(FirstChunk, nofin)
+                        end,
+                        stream_keys_chunked(ReqId, Timeout, Emit)
+                    end,
+                    {stream, StreamInit, ChunkFun};
+                false ->
+                    Body = iolist_to_binary([FirstChunk,
+                        collect_stream_keys(ReqId, [], Timeout)]),
+                    {ok, json_backend_reply(200, Body)}
+            end;
         {error, Reason} ->
             {error, bucket_error_map(Reason)}
     end.
@@ -1111,6 +1314,35 @@ collect_stream_keys_loop(ReqId, Acc, Timeout) ->
         iolist_to_binary(lists:reverse([encode_key_stream_timeout() | Acc]))
     end.
 
+%% S2 (CG-001): Incremental streaming for key listing.
+stream_keys_chunked(ReqId, Timeout, Emit) ->
+    CeilingMs = stream_collection_ceiling(),
+    EffectiveTimeout = erlang:min(Timeout, CeilingMs),
+    stream_keys_chunked_loop(ReqId, EffectiveTimeout, Emit).
+
+stream_keys_chunked_loop(ReqId, Timeout, Emit) ->
+    receive
+        {ReqId, done} ->
+            Emit(encode_key_list([]), fin);
+        {ReqId, From, {keys, Keys}} ->
+            _ = riak_kv_keys_fsm:ack_keys(From),
+            Emit(encode_key_list(Keys), nofin),
+            stream_keys_chunked_loop(ReqId, Timeout, Emit);
+        {ReqId, {keys, Keys}} ->
+            Emit(encode_key_list(Keys), nofin),
+            stream_keys_chunked_loop(ReqId, Timeout, Emit);
+        {ReqId, {error, timeout}} ->
+            logger:warning("[riak_admin] key stream timed out (backend timeout)"),
+            Emit(encode_key_stream_timeout(), fin);
+        {ReqId, {error, Reason}} ->
+            logger:warning("[riak_admin] key stream error: ~p", [Reason]),
+            Emit(encode_key_stream_error(Reason), fin)
+    after Timeout ->
+        logger:warning("[riak_admin] key stream timed out after ~Bms ceiling",
+                       [Timeout]),
+        Emit(encode_key_stream_timeout(), fin)
+    end.
+
 encode_key_list(Keys) ->
     mochijson2:encode({struct, [{?JSON_KEYS, Keys}]}).
 
@@ -1130,6 +1362,18 @@ encode_key_stream_error(Reason) ->
 -spec stream_collection_ceiling() -> pos_integer().
 stream_collection_ceiling() ->
     application:get_env(riak_admin_api, stream_collection_ceiling_ms, 300000).
+
+%% @doc Return whether incremental streaming is enabled.
+%%
+%% S2 (CG-001): When true (default), stream-mode responses for
+%% key listing, bucket listing, and index queries use Cowboy's
+%% chunked transfer encoding for bounded memory use. When false,
+%% falls back to the pre-S2 aggregated-body behavior.
+%%
+%% Toggle: set stream_incremental_enabled => false to rollback.
+-spec stream_incremental_enabled() -> boolean().
+stream_incremental_enabled() ->
+    application:get_env(riak_admin_api, stream_incremental_enabled, true).
 
 counter_get_operation(Context, Client) ->
     Query = maps:get(query, Context, #{}),
@@ -1217,53 +1461,62 @@ crdt_fetch_operation(Context, Client) ->
     end.
 
 crdt_update_operation(Mode, Context0, Input, Client) ->
+    %% S2 (CG-007): For create mode (no key), also check collection redirect.
     case maybe_crdt_counter_redirect(Context0) of
         {redirect, Location} ->
             {ok, crdt_redirect_reply(Location)};
         no_redirect ->
-            Context = case Mode of
-                create ->
-                    Context0#{key => list_to_binary(riak_core_util:unique_id_62())};
+            case {Mode, maybe_crdt_collection_redirect(Context0)} of
+                {create, {redirect, CollLoc}} ->
+                    {ok, crdt_redirect_reply(CollLoc)};
                 _ ->
-                    Context0
-            end,
-            case crdt_bucket_module(Context) of
-                {ok, Type, Mod} ->
-                    Query = maps:get(query, Context, #{}),
-                    ReturnBody = crdt_query_flag(Query, <<"returnbody">>, false),
-                    IncludeContext = crdt_query_flag(Query, <<"include_context">>, true),
-                    case crdt_decode_update_body(Type, maps:get(body, Input, <<>>)) of
-                        {ok, Op, OpCtx} ->
-                            Obj = riak_kv_crdt:new(
-                                bucket_ref(Context),
-                                maps:get(key, Context, undefined),
-                                Mod),
-                            CrdtOp = #crdt_op{mod = Mod, op = Op, ctx = OpCtx},
-                            BaseOptions = build_object_options(write, Query, []),
-                            Options0 = [
-                                {crdt_op, CrdtOp},
-                                {retry_put_coordinator_failure, false}
-                                | BaseOptions
-                            ],
-                            Options = case ReturnBody of
-                                true -> [returnbody | Options0];
-                                false -> Options0
-                            end,
-                            case riak_client:put(Obj, Options, Client) of
-                                ok ->
-                                    {ok, crdt_write_no_body_reply(Mode, Context)};
-                                {ok, UpdatedObj} ->
-                                    {ok, crdt_write_body_reply(
-                                        Mode, Context, Type, Mod, UpdatedObj, IncludeContext)};
-                                {error, Reason} ->
-                                    {error, object_error_map(Reason)}
-                            end;
-                        {error, Error} ->
-                            {error, Error}
+                    crdt_update_operation_inner(Mode, Context0, Input, Client)
+            end
+    end.
+
+crdt_update_operation_inner(Mode, Context0, Input, Client) ->
+    Context = case Mode of
+        create ->
+            Context0#{key => list_to_binary(riak_core_util:unique_id_62())};
+        _ ->
+            Context0
+    end,
+    case crdt_bucket_module(Context) of
+        {ok, Type, Mod} ->
+            Query = maps:get(query, Context, #{}),
+            ReturnBody = crdt_query_flag(Query, <<"returnbody">>, false),
+            IncludeContext = crdt_query_flag(Query, <<"include_context">>, true),
+            case crdt_decode_update_body(Type, maps:get(body, Input, <<>>)) of
+                {ok, Op, OpCtx} ->
+                    Obj = riak_kv_crdt:new(
+                        bucket_ref(Context),
+                        maps:get(key, Context, undefined),
+                        Mod),
+                    CrdtOp = #crdt_op{mod = Mod, op = Op, ctx = OpCtx},
+                    BaseOptions = build_object_options(write, Query, []),
+                    Options0 = [
+                        {crdt_op, CrdtOp},
+                        {retry_put_coordinator_failure, false}
+                        | BaseOptions
+                    ],
+                    Options = case ReturnBody of
+                        true -> [returnbody | Options0];
+                        false -> Options0
+                    end,
+                    case riak_client:put(Obj, Options, Client) of
+                        ok ->
+                            {ok, crdt_write_no_body_reply(Mode, Context)};
+                        {ok, UpdatedObj} ->
+                            {ok, crdt_write_body_reply(
+                                Mode, Context, Type, Mod, UpdatedObj, IncludeContext)};
+                        {error, Reason} ->
+                            {error, object_error_map(Reason)}
                     end;
                 {error, Error} ->
                     {error, Error}
-            end
+            end;
+        {error, Error} ->
+            {error, Error}
     end.
 
 crdt_write_no_body_reply(create, Context) ->
@@ -1297,6 +1550,22 @@ maybe_crdt_counter_redirect(Context) ->
         {<<"default">>, Key} when is_binary(Key), Key =/= <<>> ->
             Bucket = maps:get(bucket, Context, <<>>),
             {redirect, <<"/buckets/", Bucket/binary, "/counters/", Key/binary>>};
+        _ ->
+            no_redirect
+    end.
+
+%% S2 (CG-007): Redirect CRDT collection (create) path for default bucket type.
+%% When bucket_type is <<"default">> and no key is supplied (collection create),
+%% redirect to the legacy /buckets/.../counters path. This mirrors the keyed
+%% redirect in maybe_crdt_counter_redirect/1 but covers the POST-to-create case.
+maybe_crdt_collection_redirect(Context) ->
+    case {maps:get(bucket_type, Context, <<"default">>), maps:get(key, Context, undefined)} of
+        {<<"default">>, undefined} ->
+            Bucket = maps:get(bucket, Context, <<>>),
+            {redirect, <<"/buckets/", Bucket/binary, "/counters">>};
+        {<<"default">>, <<>>} ->
+            Bucket = maps:get(bucket, Context, <<>>),
+            {redirect, <<"/buckets/", Bucket/binary, "/counters">>};
         _ ->
             no_redirect
     end.
@@ -1603,13 +1872,29 @@ stream_index_reply(Request, Client) ->
     case riak_client:stream_get_index(Bucket, Query, Opts, Client) of
         {ok, ReqId, FSMPid} ->
             Timeout = proplists:get_value(timeout, Opts, infinity),
-            Body = collect_stream_index(
-                ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout, undefined, 0, []),
-            {ok, #{
-                status => 200,
-                body => Body,
-                content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
-            }};
+            case stream_incremental_enabled() of
+                true ->
+                    %% S2 (CG-001): True incremental streaming
+                    StreamInit = #{
+                        status => 200,
+                        content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+                    },
+                    ChunkFun = fun(Emit) ->
+                        stream_index_chunked(
+                            ReqId, FSMPid, Boundary, ReturnTerms,
+                            MaxResults, Timeout, undefined, 0, Emit)
+                    end,
+                    {stream, StreamInit, ChunkFun};
+                false ->
+                    Body = collect_stream_index(
+                        ReqId, FSMPid, Boundary, ReturnTerms, MaxResults,
+                        Timeout, undefined, 0, []),
+                    {ok, #{
+                        status => 200,
+                        body => Body,
+                        content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+                    }}
+            end;
         {error, Reason} ->
             {error, bucket_error_map(Reason)}
     end.
@@ -1639,6 +1924,37 @@ collect_stream_index(ReqId, FSMPid, Boundary, ReturnTerms, MaxResults, Timeout, 
     after Timeout ->
         whack_index_fsm(ReqId, FSMPid),
         iolist_to_binary(lists:reverse([index_stream_error(Boundary, {error, timeout}) | Acc]))
+    end.
+
+%% S2 (CG-001): Incremental streaming for index queries.
+stream_index_chunked(ReqId, FSMPid, Boundary, ReturnTerms, MaxResults,
+                     Timeout, LastResult, Count, Emit) ->
+    receive
+        {ReqId, done} ->
+            Final = index_stream_final(Boundary, MaxResults, LastResult, Count),
+            Emit(iolist_to_binary(Final), fin);
+        {ReqId, {results, []}} ->
+            stream_index_chunked(
+                ReqId, FSMPid, Boundary, ReturnTerms,
+                MaxResults, Timeout, LastResult, Count, Emit);
+        {ReqId, {results, Results}} ->
+            JsonResults = riak_kv_wm_index:encode_results(ReturnTerms, Results),
+            Part = iolist_to_binary([
+                "\r\n--", Boundary, "\r\n",
+                "Content-Type: application/json\r\n\r\n",
+                JsonResults
+            ]),
+            Emit(Part, nofin),
+            LastResult1 = index_last_result(Results),
+            Count1 = Count + length(Results),
+            stream_index_chunked(
+                ReqId, FSMPid, Boundary, ReturnTerms,
+                MaxResults, Timeout, LastResult1, Count1, Emit);
+        {ReqId, Error} ->
+            Emit(iolist_to_binary(index_stream_error(Boundary, Error)), fin)
+    after Timeout ->
+        whack_index_fsm(ReqId, FSMPid),
+        Emit(iolist_to_binary(index_stream_error(Boundary, {error, timeout})), fin)
     end.
 
 index_stream_final(Boundary, MaxResults, LastResult, Count) ->
@@ -2001,21 +2317,26 @@ query_validation_error(Stage, Reason) ->
     }.
 
 mapred_operation(_Context, Input, _Client) ->
-    case mapred_body_map(Input) of
-        {ok, BodyMap} ->
-            case validate_mapred_body(BodyMap) of
-                ok ->
-                    case mapred_backend_available() of
-                        true ->
-                            mapred_operation_legacy(Input);
-                        false ->
-                            {error, mapred_unavailable_error()}
+    case mapred_backend_enabled() of
+        false ->
+            {error, mapred_disabled_error()};
+        true ->
+            case mapred_body_map(Input) of
+                {ok, BodyMap} ->
+                    case validate_mapred_body(BodyMap) of
+                        ok ->
+                            case mapred_backend_available() of
+                                true ->
+                                    mapred_operation_legacy(Input);
+                                false ->
+                                    {error, mapred_unavailable_error()}
+                            end;
+                        {error, Reason} ->
+                            {error, mapred_invalid_body_error(Reason)}
                     end;
                 {error, Reason} ->
                     {error, mapred_invalid_body_error(Reason)}
-            end;
-        {error, Reason} ->
-            {error, mapred_invalid_body_error(Reason)}
+            end
     end.
 
 mapred_body_map(Input) ->
@@ -2044,11 +2365,25 @@ mapred_backend_available() ->
     code:which(riak_kv_mapred_json) =/= non_existing andalso
     code:which(riak_kv_mrc_pipe) =/= non_existing.
 
+%% S2 (CG-006): Operator toggle for MapReduce backend.
+%% When false, mapred_operation returns 503 immediately (operator-disabled).
+%% When true (default), falls through to mapred_backend_available/0 which
+%% checks module presence (returns 501 if absent).
+mapred_backend_enabled() ->
+    application:get_env(riak_admin_api, mapred_backend_enabled, true).
+
 mapred_unavailable_error() ->
     #{
         status => 501,
         code => <<"not_implemented">>,
         reason => <<"MapReduce backend unavailable in this build">>
+    }.
+
+mapred_disabled_error() ->
+    #{
+        status => 503,
+        code => <<"service_unavailable">>,
+        reason => <<"MapReduce backend disabled by operator configuration">>
     }.
 
 mapred_invalid_body_error(Reason) ->
@@ -2112,15 +2447,28 @@ mapred_collect_nonchunked_reply(Mrc, ParsedQuery) ->
 mapred_collect_chunked_reply(Mrc, ParsedQuery) ->
     Boundary = list_to_binary(riak_core_util:unique_id_62()),
     HasMRQuery = ParsedQuery =/= [],
-    case mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, []) of
-        {ok, Body} ->
-            {ok, #{
+    case stream_incremental_enabled() of
+        true ->
+            %% S2 (CG-001): True incremental streaming for chunked mapred
+            StreamInit = #{
                 status => 200,
-                body => Body,
                 content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
-            }};
-        {error, ErrorMap} ->
-            {error, ErrorMap}
+            },
+            ChunkFun = fun(Emit) ->
+                mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit)
+            end,
+            {stream, StreamInit, ChunkFun};
+        false ->
+            case mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, []) of
+                {ok, Body} ->
+                    {ok, #{
+                        status => 200,
+                        body => Body,
+                        content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+                    }};
+                {error, ErrorMap} ->
+                    {error, ErrorMap}
+            end
     end.
 
 mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc) ->
@@ -2149,6 +2497,46 @@ mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc) ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
             {error, mapred_backend_error(Json)}
+    end.
+
+%% S2 (CG-001): Incremental streaming for chunked mapreduce.
+mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit) ->
+    case riak_kv_mrc_pipe:receive_sink(Mrc) of
+        {ok, Done, Outputs} ->
+            Parts = [mapred_result_part(Output, HasMRQuery, Boundary)
+                     || Output <- Outputs],
+            case Done of
+                true ->
+                    riak_kv_mrc_pipe:cleanup_sink(Mrc),
+                    Final = iolist_to_binary(
+                        [Parts, <<"\r\n--", Boundary/binary, "--\r\n">>]),
+                    Emit(Final, fin);
+                false ->
+                    case Parts of
+                        [] -> ok;
+                        _ -> Emit(iolist_to_binary(Parts), nofin)
+                    end,
+                    mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit)
+            end;
+        {error, timeout, _} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            ErrorJson = jsx:encode(#{error => <<"timeout">>,
+                                     reason => <<"mapreduce timed out">>}),
+            Emit(ErrorJson, fin);
+        {error, {sender_died, Error}, _} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            ErrorJson = jsx:encode(#{error => <<"backend_error">>,
+                                     reason => to_bin(Error)}),
+            Emit(ErrorJson, fin);
+        {error, {sink_died, Error}, _} ->
+            riak_kv_mrc_pipe:cleanup_sink(Mrc),
+            ErrorJson = jsx:encode(#{error => <<"backend_error">>,
+                                     reason => to_bin(Error)}),
+            Emit(ErrorJson, fin);
+        {error, {From, Info}, _} ->
+            riak_kv_mrc_pipe:destroy_sink(Mrc),
+            Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
+            Emit(to_bin(Json), fin)
     end.
 
 mapred_jsonify_results(Results) ->

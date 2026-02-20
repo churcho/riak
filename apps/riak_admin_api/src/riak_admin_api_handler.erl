@@ -586,6 +586,8 @@ execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
     case run_bucket_backend(Backend, Action, Context, Input) of
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
+        {stream, StreamInit, ChunkFun} ->
+            reply_stream(Context, Req, StreamInit, ChunkFun, ReplyOpts);
         {error, Error} when is_map(Error) ->
             riak_admin_api_response:reply_error_map(
                 with_error_context(Error, Context, ReplyOpts),
@@ -613,6 +615,40 @@ execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
                     Context,
                     ReplyOpts),
                 Req)
+    end.
+
+%% S2 (CG-001): Handle streaming responses from the backend.
+%% The backend returns {stream, StreamInit, ChunkFun} where:
+%%   - StreamInit is a map with status, content_type, and optional headers
+%%   - ChunkFun is fun(EmitFun) -> ok, where EmitFun is fun(Data, fin|nofin)
+%% The handler starts a Cowboy streaming response and provides the emitter.
+reply_stream(_Context, Req, StreamInit, ChunkFun, BaseReplyOpts) ->
+    Status = maps:get(status, StreamInit, 200),
+    ReplyOpts = maps:merge(BaseReplyOpts, maps:get(reply_opts, StreamInit, #{})),
+    Headers0 = maybe_put_content_type(
+        maps:get(content_type, StreamInit, undefined),
+        maps:get(headers, StreamInit, #{})),
+    Req1 = riak_admin_api_response:stream_reply_init(
+        Status, Req, ReplyOpts, Headers0),
+    Emit = fun(Data, IsFin) ->
+        riak_admin_api_response:stream_reply_body(Data, IsFin, Req1)
+    end,
+    try
+        ChunkFun(Emit),
+        Req1
+    catch
+        Class:Reason:Stack ->
+            logger:error(
+                "[riak_admin] stream emission failed: ~p:~p~n~p",
+                [Class, Reason, Stack]),
+            ErrorJson = jsx:encode(#{
+                error => <<"stream_error">>,
+                reason => iolist_to_binary(
+                    io_lib:format("~p:~p", [Class, Reason]))
+            }),
+            catch riak_admin_api_response:stream_reply_body(
+                ErrorJson, fin, Req1),
+            Req1
     end.
 
 reply_object(Context, Req, Reply, BaseReplyOpts) ->

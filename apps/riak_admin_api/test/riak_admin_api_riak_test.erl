@@ -385,3 +385,99 @@ stream_collection_ceiling_override_test() ->
             {ok, V} -> application:set_env(riak_admin_api, stream_collection_ceiling_ms, V)
         end
     end.
+
+%%% ============================================================
+%%% S2 (CG-001): stream_incremental_enabled/0
+%%% ============================================================
+
+stream_incremental_enabled_default_true_test() ->
+    OldVal = application:get_env(riak_admin_api, stream_incremental_enabled),
+    application:unset_env(riak_admin_api, stream_incremental_enabled),
+    try
+        ?assertEqual(true, riak_admin_api_riak:stream_incremental_enabled())
+    after
+        case OldVal of
+            undefined -> ok;
+            {ok, V} -> application:set_env(riak_admin_api, stream_incremental_enabled, V)
+        end
+    end.
+
+stream_incremental_enabled_override_false_test() ->
+    OldVal = application:get_env(riak_admin_api, stream_incremental_enabled),
+    application:set_env(riak_admin_api, stream_incremental_enabled, false),
+    try
+        ?assertEqual(false, riak_admin_api_riak:stream_incremental_enabled())
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, stream_incremental_enabled);
+            {ok, V} -> application:set_env(riak_admin_api, stream_incremental_enabled, V)
+        end
+    end.
+
+%%% ============================================================
+%%% S2 (CG-004): check_write_preconditions/3
+%%% ============================================================
+
+check_write_preconditions_no_conditions_passes_test() ->
+    %% No If-Match or If-Unmodified-Since => ok immediately (no read needed)
+    Context = #{bucket_type => <<"default">>, bucket => <<"b">>, key => <<"k">>},
+    CondOpts = [{w, 2}],
+    %% Client is unused when no conditionals are present
+    ?assertEqual(ok, riak_admin_api_riak:check_write_preconditions(
+        Context, CondOpts, unused_client)).
+
+%%% ============================================================
+%%% S2 (CG-006): mapred_backend_enabled/0
+%%% ============================================================
+
+mapred_backend_enabled_default_true_test() ->
+    OldVal = application:get_env(riak_admin_api, mapred_backend_enabled),
+    application:unset_env(riak_admin_api, mapred_backend_enabled),
+    try
+        ?assertEqual(true, riak_admin_api_riak:mapred_backend_enabled())
+    after
+        case OldVal of
+            undefined -> ok;
+            {ok, V} -> application:set_env(riak_admin_api, mapred_backend_enabled, V)
+        end
+    end.
+
+mapred_backend_enabled_override_false_test() ->
+    OldVal = application:get_env(riak_admin_api, mapred_backend_enabled),
+    application:set_env(riak_admin_api, mapred_backend_enabled, false),
+    try
+        ?assertEqual(false, riak_admin_api_riak:mapred_backend_enabled())
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, mapred_backend_enabled);
+            {ok, V} -> application:set_env(riak_admin_api, mapred_backend_enabled, V)
+        end
+    end.
+
+%%% ============================================================
+%%% S2 (CG-007): maybe_crdt_collection_redirect/1
+%%% ============================================================
+
+crdt_collection_redirect_default_type_no_key_test() ->
+    %% Default bucket type with no key => redirect to /buckets/.../counters
+    Context = #{bucket_type => <<"default">>, bucket => <<"scores">>, key => undefined},
+    ?assertMatch({redirect, <<"/buckets/scores/counters">>},
+                 riak_admin_api_riak:maybe_crdt_collection_redirect(Context)).
+
+crdt_collection_redirect_default_type_empty_key_test() ->
+    %% Default bucket type with empty key => redirect
+    Context = #{bucket_type => <<"default">>, bucket => <<"scores">>, key => <<>>},
+    ?assertMatch({redirect, <<"/buckets/scores/counters">>},
+                 riak_admin_api_riak:maybe_crdt_collection_redirect(Context)).
+
+crdt_collection_redirect_non_default_type_no_redirect_test() ->
+    %% Non-default bucket type => no redirect
+    Context = #{bucket_type => <<"maps">>, bucket => <<"data">>, key => undefined},
+    ?assertEqual(no_redirect,
+                 riak_admin_api_riak:maybe_crdt_collection_redirect(Context)).
+
+crdt_collection_redirect_default_with_key_no_redirect_test() ->
+    %% Default bucket type WITH a key => no redirect (keyed path handled elsewhere)
+    Context = #{bucket_type => <<"default">>, bucket => <<"scores">>, key => <<"k1">>},
+    ?assertEqual(no_redirect,
+                 riak_admin_api_riak:maybe_crdt_collection_redirect(Context)).

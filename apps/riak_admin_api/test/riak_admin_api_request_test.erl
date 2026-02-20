@@ -715,3 +715,24 @@ auth_guardrail_respects_app_env_test() ->
             {ok, V} -> application:set_env(riak_admin_api, security_require_auth, V)
         end
     end.
+
+%%% ============================================================
+%%% S2 (CG-008): /riak counters alias explicitly rejected
+%%% ============================================================
+
+riak_counters_path_returns_404_test() ->
+    %% /riak/Bucket/counters/Key has 4 segments => catch-all returns 404
+    {error, Err} = riak_admin_api_request:normalize_path(
+        <<"GET">>, <<"/riak/mybucket/counters/mykey">>, #{}),
+    ?assertEqual(404, maps:get(status, Err)),
+    ?assertEqual(<<"unknown_route">>, maps:get(code, Err)).
+
+riak_counters_collection_path_normalizes_as_object_not_counter_test() ->
+    %% /riak/Bucket/counters (3 segments) => matches /riak/Bucket/Key pattern
+    %% where Key="counters", NOT a counter collection. This confirms no counter
+    %% alias exists on /riak.
+    {ok, Ctx} = riak_admin_api_request:normalize_path(
+        <<"POST">>, <<"/riak/mybucket/counters">>, #{}),
+    ?assertEqual(object_item, maps:get(op, Ctx)),
+    ?assertEqual(<<"mybucket">>, maps:get(bucket, Ctx)),
+    ?assertEqual(<<"counters">>, maps:get(key, Ctx)).

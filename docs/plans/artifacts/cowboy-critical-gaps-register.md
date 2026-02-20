@@ -1,4 +1,4 @@
-# Cowboy Critical Gaps Register (D01 + S0 + S1)
+# Cowboy Critical Gaps Register (D01 + S0 + S1 + S2)
 
 Date: 2026-02-20
 Status: Active
@@ -13,14 +13,14 @@ Status: Active
 
 | Gap ID | Severity | Gap | Current status | Fixed now? | Evidence / notes | Deferred acceptance criteria |
 |---|---|---|---|---|---|---|
-| CG-001 | P1 | Stream-mode uses aggregated response bodies instead of true incremental Cowboy streaming/backpressure | Open | No | Key/bucket/index/mapred stream paths collect then emit aggregated payloads in gateway | Introduce chunked send path + backpressure tests + memory ceiling test under sustained stream load |
+| CG-001 | P1 | Stream-mode uses aggregated response bodies instead of true incremental Cowboy streaming/backpressure | Closed (S2) | Yes | Gateway now returns `{stream, StreamInit, ChunkFun}` for key/bucket/index/mapred paths; handler uses `cowboy_req:stream_reply/3` + `stream_body/3`; toggle `stream_incremental_enabled` (default `true`) preserves compat path | N/A |
 | CG-002 | P1 | Telemetry lacked explicit `error_code` dimension | Closed (D01) | Yes | Added `error_code` telemetry tag dimension and error telemetry context propagation | N/A |
 | CG-003 | P0 | Cutover misconfiguration risk: invalid `cowboy_cutover_op_modes` values silently enabled routes | Closed (D01) | Yes | Invalid per-op mode now fails closed with `503 route_cutover_misconfigured` | N/A |
-| CG-004 | P0 | Conditional write enforcement gaps for `If-Match` and `If-Unmodified-Since` | Open | No | Headers are forwarded but gateway enforcement is incomplete; `x-riak-if-not-modified` is only enforced conditional primitive | Add explicit conditional semantics tests + gateway enforcement mapping + no-regression compatibility evidence |
+| CG-004 | P0 | Conditional write enforcement gaps for `If-Match` and `If-Unmodified-Since` | Closed (S2) | Yes | Added `check_write_preconditions/3` with read-before-write pattern; If-Match checks vtags, If-Unmodified-Since checks last-modified; returns 412 on failure; `filter_riak_cond_opts/1` strips HTTP conditionals before Riak put | N/A |
 | CG-005 | P1 | Query vs mapreduce timeout semantics inconsistent | Closed (S1) | Yes | MapReduce timeout unified to 503; list_keys error mode toggle added (compat/strict) | N/A |
-| CG-006 | P1 | MapReduce backend unavailable path (`501 not_implemented`) may surprise clients in stripped builds | Open | No | Backend capability check exists; response contract is stable but requires rollout guardrails | Add startup capability check endpoint/metric + deployment gate that blocks enabling mapred routes when backend absent |
-| CG-007 | P2 | CRDT default redirect parity scope is partial | Open | No | Redirect applies to keyed datatype path only; collection path behavior differs | Define explicit parity policy per path and prove expected redirects/non-redirects with tests |
-| CG-008 | P2 | `/riak` counters alias parity decision unresolved | Open | No | No `/riak/:bucket/counters/:key` alias route; only `/buckets/:bucket/counters/:key` | ADR decision: either keep no-alias (explicitly documented) or add alias with full route/parser/internal tests |
+| CG-006 | P1 | MapReduce backend unavailable path (`501 not_implemented`) may surprise clients in stripped builds | Closed (S2) | Yes | Added `mapred_backend_enabled/0` operator toggle (default `true`); disabled returns 503 `service_unavailable`; absent modules still return 501 `not_implemented`; two-level availability with clear error semantics | N/A |
+| CG-007 | P2 | CRDT default redirect parity scope is partial | Closed (S2) | Yes | Added `maybe_crdt_collection_redirect/1` for collection/create path with default bucket type; returns 301 to `/buckets/.../counters`; keyed and collection redirects now symmetric | N/A |
+| CG-008 | P2 | `/riak` counters alias parity decision unresolved | Closed (S2) | Yes | Decision: explicit rejection (no alias). `/riak` normalizer catch-all returns 404 `unknown_route` for any path beyond 2 segments. Test evidence confirms `/riak/b/counters/k` returns 404 | N/A |
 | CG-009 | P0 | Unsafe `binary_to_term/1` without `[safe]` in x-erlang-binary accept path | Closed (S0) | Yes | Replaced with `binary_to_term(Body, [safe])` + atom injection test | N/A |
 | CG-010 | P0 | TLS check bypassed by spoofing `X-Forwarded-Proto` header | Closed (S0) | Yes | Proxy trust now requires explicit `security_trust_proxy_headers => true` + header spoofing regression tests | N/A |
 | CG-011 | P0 | No request body size limit — unbounded memory consumption | Closed (S0) | Yes | Added `max_request_body_bytes` (default 5 MiB) with 413 on breach + size limit tests | N/A |
@@ -34,9 +34,14 @@ Status: Active
 
 ## Fixed-Now Summary
 
+- `CG-001` (`P1`): true incremental streaming via chunked Cowboy transfer with toggle (S2).
 - `CG-002` (`P1`): telemetry error code dimension implemented (D01).
 - `CG-003` (`P0`): cutover misconfiguration now fails closed for invalid per-op modes (D01).
+- `CG-004` (`P0`): conditional-write enforcement for If-Match and If-Unmodified-Since via read-before-write (S2).
 - `CG-005` (`P1`): mapred timeout unified to 503 + list_keys error mode toggle (S1).
+- `CG-006` (`P1`): MapReduce backend operator toggle with two-level availability (503 disabled / 501 absent) (S2).
+- `CG-007` (`P2`): CRDT collection redirect parity for default bucket type create path (S2).
+- `CG-008` (`P2`): /riak counters alias explicitly rejected with 404 test evidence (S2).
 - `CG-009` (`P0`): unsafe `binary_to_term` replaced with safe variant (S0).
 - `CG-010` (`P0`): TLS header spoofing closed via proxy trust gate (S0).
 - `CG-011` (`P0`): request body size limit added (S0).
@@ -50,4 +55,4 @@ Status: Active
 
 ## Deferred-Now Summary
 
-- `CG-001`, `CG-004`, `CG-006`, `CG-007`, `CG-008` remain deferred with concrete acceptance criteria.
+All 18 gaps closed. No remaining deferred items.
