@@ -673,170 +673,108 @@ Query parameters: `stream`, `max_results`, `continuation`, `return_terms`,
 Use `max_results` and `continuation` for paginated browsing in a LiveView
 table component.
 
-## WebSocket / Live Stats
+## WebSocket real-time events
 
-### Current State
+The admin API provides a WebSocket endpoint for push-based dashboard
+updates. Instead of polling each HTTP endpoint on a timer, a single
+WebSocket connection delivers ring changes, cluster membership, node
+stats, handoff progress, and AAE status as they happen.
 
-There are currently **no WebSocket endpoints** in the admin API. The
-infrastructure for push-based events exists but is not wired to an HTTP
-handler:
+For the full implementation specification (event sources, module
+structure, testing plan), see `doc/WEBSOCKET_SPEC.md`.
 
-- The `cluster_events` syn group exists. The coordinator
-  (`riak_admin_api_coordinator`) joins it on startup.
-- Events are published via `syn:publish(riak_admin, cluster_events,
-  {event, Node, Event})`.
-- The coordinator forwards `{cluster_event, Event}` messages it receives
-  to the group.
+### Endpoint
 
-What is missing: a Cowboy WebSocket handler that subscribes to the group
-and pushes events to connected clients.
-
-### M8 WebSocket Implementation Plan
-
-The following steps are needed to add real-time event streaming:
-
-#### 1. Create rah_events_ws.erl
-
-```erlang
--module(rah_events_ws).
--behaviour(cowboy_websocket).
-
--export([init/2, websocket_init/1, websocket_handle/2,
-         websocket_info/2, terminate/3]).
-
-%% Upgrade HTTP to WebSocket
-init(Req, State) ->
-    {cowboy_websocket, Req, State, #{idle_timeout => 300000}}.
-
-%% Join the cluster_events group on connection
-websocket_init(State) ->
-    ok = syn:join(riak_admin, cluster_events, self()),
-    Frame = jsx:encode(#{type => <<"connected">>,
-                         node => node(),
-                         timestamp => erlang:system_time(second)}),
-    {[{text, Frame}], State#{subscriptions => [<<"*">>]}}.
-
-%% Handle client messages (subscribe/unsubscribe)
-websocket_handle({text, Msg}, State) ->
-    case jsx:decode(Msg, [return_maps]) of
-        #{<<"action">> := <<"subscribe">>, <<"topic">> := Topic} ->
-            Subs = maps:get(subscriptions, State, []),
-            {[], State#{subscriptions => [Topic | Subs]}};
-        #{<<"action">> := <<"unsubscribe">>, <<"topic">> := Topic} ->
-            Subs = maps:get(subscriptions, State, []),
-            {[], State#{subscriptions => lists:delete(Topic, Subs)}};
-        _ ->
-            {[], State}
-    end;
-websocket_handle(_Frame, State) ->
-    {[], State}.
-
-%% Receive events from syn group, encode as JSON, send to client
-websocket_info({event, Node, Event}, State) ->
-    Subs = maps:get(subscriptions, State, []),
-    Topic = event_topic(Event),
-    case lists:member(<<"*">>, Subs) orelse lists:member(Topic, Subs) of
-        true ->
-            Frame = jsx:encode(#{
-                type => <<"event">>,
-                topic => Topic,
-                node => Node,
-                data => format_event(Event),
-                timestamp => erlang:system_time(second)
-            }),
-            {[{text, Frame}], State};
-        false ->
-            {[], State}
-    end;
-websocket_info(_Info, State) ->
-    {[], State}.
-
-terminate(_Reason, _Req, _State) ->
-    ok.
-
-%% Internal
-event_topic({ring_changed, _}) -> <<"ring">>;
-event_topic({node_up, _}) -> <<"membership">>;
-event_topic({node_down, _}) -> <<"membership">>;
-event_topic({handoff_started, _}) -> <<"handoff">>;
-event_topic({handoff_completed, _}) -> <<"handoff">>;
-event_topic(_) -> <<"unknown">>.
-
-format_event(Event) when is_map(Event) -> Event;
-format_event(Event) -> #{raw => iolist_to_binary(io_lib:format("~p", [Event]))}.
+```
+ws://riak1.internal:8099/api/stream/events
 ```
 
-#### 2. Add the route
+### Available topics
 
-In `riak_admin_api_app:admin_routes/0`:
+| Topic | Trigger | What it contains |
+|-------|---------|------------------|
+| `ring` | Ring ownership changes | Full partition-to-node mapping |
+| `cluster` | Membership or readiness changes | Nodes, ring_size, claimant, pending_changes |
+| `membership` | Node join/leave | Event type + target node |
+| `node_stats` | Timer (10s default) | Erlang VM + KV metrics for all nodes |
+| `handoff` | Timer (15s default) | Active transfer list |
+| `aae` | Timer (30s default) | AAE exchange list |
+| `dcs` | syn group changes | Datacenter discovery |
 
-```erlang
-{"/api/stream/events", rah_events_ws, []}
-```
+### Frame format
 
-#### 3. Recommended frame format
-
-All frames are JSON text frames:
+All frames are JSON text:
 
 ```json
 {
   "type": "event",
   "topic": "ring",
   "node": "dev1@127.0.0.1",
-  "data": { ... event-specific payload ... },
+  "data": { "num_partitions": 64, "partitions": [...], "node_colors": {...} },
   "timestamp": 1700000000
 }
 ```
 
-Control frames from client:
+Client commands:
 
 ```json
-{"action": "subscribe", "topic": "membership"}
-{"action": "unsubscribe", "topic": "ring"}
+{"action": "subscribe", "topics": ["ring", "cluster", "node_stats"]}
+{"action": "unsubscribe", "topics": ["node_stats"]}
+{"action": "ping"}
 ```
 
-Topics: `ring`, `membership`, `handoff`, `*` (all).
+On subscribe, the server pushes the current state for each topic
+immediately as a `snapshot` frame:
 
-#### 4. Phoenix LiveView Socket connection
+```json
+{"type": "snapshot", "topic": "ring", "node": "dev1@127.0.0.1", "data": {...}, "timestamp": 1700000000}
+```
 
-Use a client-side JavaScript hook to manage the WebSocket:
+This means the dashboard renders without waiting for the next event cycle.
+
+### JavaScript hook
+
+Connect to the Riak WebSocket from a LiveView hook. The hook subscribes
+to the topics specified in `data-topics`, pushes incoming events to the
+LiveView process, and reconnects with exponential backoff on disconnect.
 
 ```javascript
 // assets/js/hooks/riak_events.js
 const RiakEvents = {
   mounted() {
-    const url = this.el.dataset.wsUrl || "ws://localhost:8099/api/stream/events";
-    this.connect(url);
+    const url = this.el.dataset.wsUrl;
+    const topics = JSON.parse(this.el.dataset.topics || '["cluster"]');
+    this.reconnectAttempts = 0;
+    this.connect(url, topics);
   },
 
-  connect(url) {
+  connect(url, topics) {
     this.ws = new WebSocket(url);
-    this.reconnectAttempts = 0;
 
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
+      this.ws.send(JSON.stringify({action: "subscribe", topics: topics}));
       this.pushEvent("ws_connected", {});
     };
 
-    this.ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      this.pushEvent("riak_event", data);
+    this.ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === "event" || msg.type === "snapshot") {
+        // Route each topic to a separate LiveView event handler.
+        // Snapshots and events have the same shape — the client
+        // treats them identically.
+        this.pushEvent("riak_" + msg.topic, msg.data);
+      }
     };
 
     this.ws.onclose = () => {
       this.pushEvent("ws_disconnected", {});
-      this.scheduleReconnect(url);
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+      this.reconnectAttempts++;
+      setTimeout(() => this.connect(url, topics), delay);
     };
 
-    this.ws.onerror = () => {
-      this.ws.close();
-    };
-  },
-
-  scheduleReconnect(url) {
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-    this.reconnectAttempts++;
-    setTimeout(() => this.connect(url), delay);
+    this.ws.onerror = () => this.ws.close();
   },
 
   destroyed() {
@@ -847,85 +785,221 @@ const RiakEvents = {
 export default RiakEvents;
 ```
 
-LiveView module:
+Register the hook in your app.js:
+
+```javascript
+import RiakEvents from "./hooks/riak_events";
+
+let liveSocket = new LiveSocket("/live", Socket, {
+  hooks: {RiakEvents}
+});
+```
+
+### LiveView module (WebSocket-driven)
+
+This replaces the polling-based dashboard. No `Process.send_after`
+calls -- every assign update comes from a WebSocket push.
 
 ```elixir
-def mount(_params, _session, socket) do
-  {:ok, assign(socket, events: [], ws_connected: false)}
-end
+defmodule MyAppWeb.ClusterDashboardLive do
+  use MyAppWeb, :live_view
 
-def handle_event("riak_event", event, socket) do
-  events = [event | Enum.take(socket.assigns.events, 99)]
-  {:noreply, assign(socket, events: events)}
-end
+  @impl true
+  def mount(_params, _session, socket) do
+    {:ok,
+     assign(socket,
+       ws_connected: false,
+       cluster: nil,
+       ring: nil,
+       node_stats: %{},
+       handoff: nil,
+       aae: nil,
+       membership_events: []
+     )}
+  end
 
-def handle_event("ws_connected", _, socket) do
-  {:noreply, assign(socket, ws_connected: true)}
-end
+  # -- WebSocket event handlers --
 
-def handle_event("ws_disconnected", _, socket) do
-  {:noreply, assign(socket, ws_connected: false)}
+  @impl true
+  def handle_event("riak_cluster", data, socket) do
+    {:noreply, assign(socket, cluster: data)}
+  end
+
+  def handle_event("riak_ring", data, socket) do
+    {:noreply, assign(socket, ring: data)}
+  end
+
+  def handle_event("riak_node_stats", data, socket) do
+    {:noreply, assign(socket, node_stats: data)}
+  end
+
+  def handle_event("riak_handoff", data, socket) do
+    {:noreply, assign(socket, handoff: data)}
+  end
+
+  def handle_event("riak_aae", data, socket) do
+    {:noreply, assign(socket, aae: data)}
+  end
+
+  def handle_event("riak_membership", data, socket) do
+    events = [data | Enum.take(socket.assigns.membership_events, 49)]
+    {:noreply, assign(socket, membership_events: events)}
+  end
+
+  def handle_event("ws_connected", _, socket) do
+    {:noreply, assign(socket, ws_connected: true)}
+  end
+
+  def handle_event("ws_disconnected", _, socket) do
+    {:noreply, assign(socket, ws_connected: false)}
+  end
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <div id="riak-events"
+         phx-hook="RiakEvents"
+         data-ws-url={"ws://#{@riak_admin_host}/api/stream/events"}
+         data-topics={Jason.encode!(~w(cluster ring node_stats handoff aae membership))}>
+
+      <.connection_indicator connected={@ws_connected} />
+
+      <%= if @cluster do %>
+        <.cluster_header cluster={@cluster} />
+      <% end %>
+
+      <%= if @ring do %>
+        <.ring_chart ring={@ring} />
+      <% end %>
+
+      <.node_stats_grid stats={@node_stats} nodes={@cluster && @cluster["nodes"]} />
+
+      <.handoff_panel handoff={@handoff} />
+
+      <.membership_log events={@membership_events} />
+    </div>
+    """
+  end
 end
 ```
 
-Template:
+The key difference from the polling version: every component re-renders
+only when the server pushes new data for its topic. The ring chart
+updates within milliseconds of a partition transfer completing. Node
+stats arrive every 10 seconds without client-side timers.
+
+### Template: connection indicator
 
 ```heex
-<div id="riak-events"
-     phx-hook="RiakEvents"
-     data-ws-url={"ws://#{@riak_admin_host}/api/stream/events"}>
+<div class={[
+  "inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm",
+  @connected && "bg-green-100 text-green-800",
+  !@connected && "bg-amber-100 text-amber-800"
+]}>
+  <span class={[
+    "w-2 h-2 rounded-full",
+    @connected && "bg-green-500 animate-pulse",
+    !@connected && "bg-amber-500"
+  ]} />
+  <%= if @connected, do: "Live", else: "Reconnecting..." %>
 </div>
 ```
 
-#### 5. Reconnection and backpressure
+### Template: ring chart (Canvas hook)
 
-**Reconnection:** The JavaScript hook uses exponential backoff (1s, 2s, 4s,
-..., max 30s). The server-side `idle_timeout` is set to 300s (5 minutes).
-The client should send periodic ping frames or subscribe/unsubscribe
-messages to keep the connection alive.
+For the ring visualization, use a second hook that draws on a canvas
+element. When the LiveView assigns change, `updated()` redraws.
 
-**Backpressure:** If the client cannot keep up with events, Cowboy will
-buffer WebSocket frames in the handler process mailbox. To prevent memory
-exhaustion:
+```javascript
+// assets/js/hooks/ring_chart.js
+const RingChart = {
+  mounted() {
+    this.canvas = this.el.querySelector("canvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.draw();
+  },
 
-- Set a mailbox high-water mark in `websocket_info` and drop events when
-  exceeded.
-- Use topic-based filtering so clients only receive events they need.
-- Consider rate-limiting event emission in the coordinator (e.g., at most
-  one ring_changed event per second).
+  updated() {
+    this.draw();
+  },
 
-#### 6. Alternative: Server-Sent Events (SSE)
+  draw() {
+    const data = JSON.parse(this.el.dataset.ring || "null");
+    if (!data) return;
 
-If WebSocket support is not available or desired, Cowboy's `stream_reply`
-can serve Server-Sent Events:
+    const {partitions, node_colors} = data;
+    const cx = this.canvas.width / 2;
+    const cy = this.canvas.height / 2;
+    const r = Math.min(cx, cy) - 10;
+    const step = (2 * Math.PI) / partitions.length;
 
-```erlang
-init(Req0, State) ->
-    Req = cowboy_req:stream_reply(200,
-        #{<<"content-type">> => <<"text/event-stream">>,
-          <<"cache-control">> => <<"no-cache">>},
-        Req0),
-    ok = syn:join(riak_admin, cluster_events, self()),
-    loop(Req, State).
+    // OpenRiak color palette
+    const colors = [
+      "#e77117", "#222b34", "#27d7b9", "#4a90d9",
+      "#e8534e", "#6b8f71", "#9b59b6", "#f39c12"
+    ];
 
-loop(Req, State) ->
-    receive
-        {event, Node, Event} ->
-            Data = jsx:encode(#{node => Node, event => Event}),
-            cowboy_req:stream_body(
-                <<"data: ", Data/binary, "\n\n">>, nofin, Req),
-            loop(Req, State)
-    after 30000 ->
-        cowboy_req:stream_body(<<": keepalive\n\n">>, nofin, Req),
-        loop(Req, State)
-    end.
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+    partitions.forEach((p, i) => {
+      const colorIdx = node_colors[p.node] || 0;
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx, cy);
+      this.ctx.arc(cx, cy, r, i * step - Math.PI / 2, (i + 1) * step - Math.PI / 2);
+      this.ctx.fillStyle = colors[colorIdx % colors.length];
+      this.ctx.fill();
+    });
+  }
+};
+
+export default RingChart;
 ```
 
-On the Phoenix side, use `EventSource` in JavaScript or a LiveView hook
-with `fetch` and `ReadableStream`.
+```heex
+<div id="ring-chart"
+     phx-hook="RingChart"
+     phx-update="ignore"
+     data-ring={@ring && Jason.encode!(@ring)}>
+  <canvas width="400" height="400"></canvas>
+</div>
+```
 
-SSE is simpler (unidirectional, auto-reconnect built into the browser API)
-but does not support client-to-server messages for subscribe/unsubscribe.
+### Fallback: HTTP polling
+
+If WebSocket is unavailable (firewall, proxy limitations), fall back to
+the polling pattern from the earlier section. The admin API's HTTP
+endpoints remain unchanged -- the WebSocket is an addition, not a
+replacement.
+
+### Reconnection behavior
+
+The JavaScript hook uses exponential backoff: 1s, 2s, 4s, ..., max 30s.
+On reconnect, `onopen` re-subscribes to all topics. The server pushes a
+fresh snapshot for each, so the dashboard recovers its full state
+without the client needing to track what it missed.
+
+Server-side, the Cowboy `idle_timeout` (default 300s) closes connections
+that stop responding to ping frames. This cleans up zombie connections
+from clients that disappeared without a close handshake.
+
+### Backpressure
+
+If a client falls behind (message queue exceeds `ws_backpressure_limit`,
+default 1000), the server drops the event and sends a warning frame:
+
+```json
+{
+  "type": "backpressure",
+  "message_queue_len": 1042,
+  "dropped_topic": "node_stats",
+  "timestamp": 1700000000
+}
+```
+
+The client should treat this as informational. The next event for each
+topic will contain the full current state (not a diff), so no data is
+permanently lost. If backpressure warnings are frequent, consider
+unsubscribing from high-frequency topics the client doesn't need.
 
 ## Authentication Integration
 
@@ -1024,10 +1098,11 @@ requests with 426. If a reverse proxy terminates TLS, set
 ].
 ```
 
-## Example: Complete Cluster Dashboard LiveView
+## Example: polling-based cluster dashboard
 
-A working LiveView module that combines health, cluster status, and node
-stats into a single dashboard:
+A LiveView module that combines health, cluster status, and node
+stats using HTTP polling. For the WebSocket-driven version (no timers,
+instant updates), see the "WebSocket real-time events" section below.
 
 ```elixir
 defmodule MyAppWeb.ClusterDashboardLive do
