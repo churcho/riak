@@ -32,8 +32,7 @@ init(Req0, State) ->
                         <<"unknown_node">>,
                         <<"Node name not recognised: ", NodeBin/binary>>, Req1),
                     {ok, Req, State}
-            end
-        ;
+            end;
         {error, Req} ->
             {ok, Req, State}
     end.

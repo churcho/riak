@@ -685,7 +685,14 @@ ensure_origin(Context, Opts) ->
                                 code => <<"forbidden">>,
                                 reason => <<"Origin is not allowed">>
                             }}
-                    end
+                    end;
+                _ ->
+                    %% Non-binary origin header -- treat as untrusted.
+                    {error, #{
+                        status => 403,
+                        code => <<"forbidden">>,
+                        reason => <<"Origin is not allowed">>
+                    }}
             end
     end.
 
