@@ -19,6 +19,7 @@ All responses include an `X-Request-Id` header (client-supplied via the same hea
   - [Node Stats](#node-stats)
   - [Handoff Status](#handoff-status)
   - [AAE Status](#aae-status)
+  - [WebSocket Event Stream](#websocket-event-stream)
 - [Substrate Endpoints](#substrate-endpoints)
   - [MapReduce](#mapreduce)
   - [Object CRUD](#object-crud)
@@ -414,6 +415,146 @@ curl -s http://localhost:8099/api/aae/status | jq .count
 |--------|------|------|
 | 405 | `method_not_allowed` | Non-GET method |
 | 500 | `backend_error` | Entropy info computation failure |
+
+---
+
+### WebSocket Event Stream
+
+Push-based event stream over WebSocket. Replaces polling for dashboards that need near-instant updates on ring changes, cluster membership, node stats, handoff progress, and AAE status.
+
+| Property | Value |
+|----------|-------|
+| **Path** | `/api/stream/events` |
+| **Protocol** | WebSocket (upgrade from GET) |
+| **Handler** | `rah_events_ws` |
+
+The endpoint runs through the same security pipeline as other admin endpoints (TLS check, authn/authz hooks) before upgrading the connection. Failed auth returns a standard HTTP error; no WebSocket handshake occurs.
+
+#### Connection frame
+
+On successful upgrade, the server sends a `connected` frame listing the topics the client can subscribe to:
+
+```json
+{
+  "type": "connected",
+  "node": "riak@127.0.0.1",
+  "topics": ["ring", "cluster", "membership", "node_stats", "handoff", "aae", "dcs"],
+  "live": true,
+  "timestamp": 1700000000
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Always `"connected"` |
+| `node` | string | Erlang node name the client connected to |
+| `topics` | array | Available topic names |
+| `live` | boolean | `true` if the handler joined the syn event group; `false` if syn was unavailable (events will not arrive) |
+| `timestamp` | integer | Unix epoch seconds |
+
+#### Client commands
+
+All client messages are JSON text frames with an `action` field.
+
+**Subscribe:**
+
+```json
+{"action": "subscribe", "topics": ["ring", "cluster", "node_stats"]}
+```
+
+The server responds with a `subscribed` acknowledgment, then sends a `snapshot` frame for each newly subscribed topic containing the current state. Re-subscribing to an already-active topic is idempotent and does not trigger a redundant snapshot.
+
+Subscribe requests are rate-limited: at most one per `ws_subscribe_min_interval` (default 1000 ms). Faster requests receive a `rate_limited` error.
+
+**Unsubscribe:**
+
+```json
+{"action": "unsubscribe", "topics": ["node_stats"]}
+```
+
+Returns an `unsubscribed` acknowledgment. Events for the removed topics stop arriving.
+
+**Ping:**
+
+```json
+{"action": "ping"}
+```
+
+Returns a `pong` frame with a `timestamp` field. Useful for latency measurement.
+
+#### Server frames
+
+**Event frame** -- pushed when data changes for a subscribed topic:
+
+```json
+{
+  "type": "event",
+  "topic": "ring",
+  "node": "riak@127.0.0.1",
+  "data": {"num_partitions": 64, "partitions": [...], "node_colors": {...}},
+  "timestamp": 1700000000
+}
+```
+
+**Snapshot frame** -- pushed once per topic on subscribe:
+
+```json
+{
+  "type": "snapshot",
+  "topic": "ring",
+  "node": "riak@127.0.0.1",
+  "data": {"num_partitions": 64, "partitions": [...], "node_colors": {...}},
+  "timestamp": 1700000000
+}
+```
+
+Snapshots and events have the same shape. The client can treat them identically.
+
+**Backpressure frame** -- pushed when the client falls behind:
+
+```json
+{
+  "type": "backpressure",
+  "message_queue_len": 142,
+  "dropped_topic": "node_stats",
+  "timestamp": 1700000000
+}
+```
+
+If the server-side message queue exceeds `ws_backpressure_limit` (default 100), the event is dropped and this warning is sent instead. The next event for each topic carries the full current state, so no data is permanently lost.
+
+#### Topics
+
+| Topic | Source | Default interval | Data shape |
+|-------|--------|-----------------|------------|
+| `ring` | Push (ring events) | -- | Same as `GET /api/ring/ownership` |
+| `cluster` | Push (ring events) | -- | Same as `GET /api/cluster/status` (without `remote_dcs`) |
+| `membership` | Push (node watcher) | -- | `{"events": [...], "services": [...]}` |
+| `node_stats` | Poll | 10s | Map of node name to `{"erlang": {...}, "kv": {...}}` |
+| `handoff` | Poll | 15s | Same as `GET /api/handoff/status` |
+| `aae` | Poll | 30s | Same as `GET /api/aae/status` |
+| `dcs` | Push (syn group) | -- | Same as `GET /api/dcs` |
+
+Push-based topics publish immediately when the underlying event fires. Poll-based topics publish only when the data has changed from the previous poll (controlled by `bridge_diff_detection`).
+
+#### Errors
+
+| Code | When |
+|------|------|
+| `invalid_message` | Frame is not valid JSON or not a JSON object |
+| `invalid_topics` | `topics` field is not an array of strings |
+| `unknown_action` | `action` value not recognized |
+| `rate_limited` | Subscribe sent too soon after the previous one |
+| `internal_error` | Server-side dispatch crash (logged, connection stays open) |
+
+Error frames have the shape `{"type": "error", "code": "<code>", "reason": "<message>"}`.
+
+**Example (websocat):**
+
+```bash
+websocat ws://localhost:8099/api/stream/events
+> {"action": "subscribe", "topics": ["ring", "cluster"]}
+```
 
 ---
 
@@ -1461,6 +1602,24 @@ All settings are read from `riak_admin_api` application environment.
 | `security_require_auth` | `false` | Require auth hooks to be configured |
 | `authn_hook` | `undefined` | Authentication callback |
 | `authz_hook` | `undefined` | Authorization callback |
+
+### WebSocket Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ws_idle_timeout` | `300000` | Close connection after this many ms of inactivity (5 min) |
+| `ws_max_frame_size` | `65536` | Maximum incoming frame size in bytes (64 KB) |
+| `ws_subscribe_min_interval` | `1000` | Minimum ms between subscribe requests per connection |
+| `ws_backpressure_limit` | `100` | Message queue length before dropping events and sending a backpressure warning |
+
+### Event Bridge Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `bridge_stats_interval` | `10000` | Node stats polling interval (ms) |
+| `bridge_handoff_interval` | `15000` | Handoff status polling interval (ms) |
+| `bridge_aae_interval` | `30000` | AAE status polling interval (ms) |
+| `bridge_diff_detection` | `true` | Only publish poll-based events when data changes from previous poll |
 
 ### Cluster Status Settings
 

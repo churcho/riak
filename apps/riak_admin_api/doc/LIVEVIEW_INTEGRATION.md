@@ -678,10 +678,12 @@ table component.
 The admin API provides a WebSocket endpoint for push-based dashboard
 updates. Instead of polling each HTTP endpoint on a timer, a single
 WebSocket connection delivers ring changes, cluster membership, node
-stats, handoff progress, and AAE status as they happen.
+stats, handoff progress, AAE status, and datacenter topology changes
+as they happen.
 
-For the full implementation specification (event sources, module
-structure, testing plan), see `doc/WEBSOCKET_SPEC.md`.
+For the full protocol reference (error codes, configuration tunables,
+topic data shapes), see the [API Reference](API_REFERENCE.md#websocket-event-stream).
+For the implementation specification, see `doc/WEBSOCKET_SPEC.md`.
 
 ### Endpoint
 
@@ -700,6 +702,30 @@ ws://riak1.internal:8099/api/stream/events
 | `handoff` | Timer (15s default) | Active transfer list |
 | `aae` | Timer (30s default) | AAE exchange list |
 | `dcs` | syn group changes | Datacenter discovery |
+
+### Rate limiting
+
+Subscribe requests are rate-limited per connection. The server enforces a
+minimum interval of `ws_subscribe_min_interval` (default 1000 ms) between
+subscribe commands. If a client sends a subscribe too quickly after the
+previous one, the server responds with a `rate_limited` error and the
+subscription list is not modified.
+
+### Error frames
+
+All errors have the shape:
+
+```json
+{"type": "error", "code": "<code>", "reason": "<human-readable message>"}
+```
+
+| Code | When |
+|------|------|
+| `invalid_message` | Frame is not valid JSON or not a JSON object |
+| `invalid_topics` | `topics` field is not an array of strings |
+| `unknown_action` | `action` value not recognized |
+| `rate_limited` | Subscribe sent within the rate limit window |
+| `internal_error` | Server-side dispatch crash (connection stays open) |
 
 ### Frame format
 
@@ -764,6 +790,11 @@ const RiakEvents = {
         // Snapshots and events have the same shape — the client
         // treats them identically.
         this.pushEvent("riak_" + msg.topic, msg.data);
+      } else if (msg.type === "backpressure") {
+        console.warn("Riak WS backpressure: dropped", msg.dropped_topic,
+                     "queue_len=" + msg.message_queue_len);
+      } else if (msg.type === "error") {
+        console.error("Riak WS error:", msg.code, msg.reason);
       }
     };
 
@@ -814,6 +845,7 @@ defmodule MyAppWeb.ClusterDashboardLive do
        node_stats: %{},
        handoff: nil,
        aae: nil,
+       dcs: nil,
        membership_events: []
      )}
   end
@@ -846,6 +878,10 @@ defmodule MyAppWeb.ClusterDashboardLive do
     {:noreply, assign(socket, membership_events: events)}
   end
 
+  def handle_event("riak_dcs", data, socket) do
+    {:noreply, assign(socket, dcs: data)}
+  end
+
   def handle_event("ws_connected", _, socket) do
     {:noreply, assign(socket, ws_connected: true)}
   end
@@ -860,7 +896,7 @@ defmodule MyAppWeb.ClusterDashboardLive do
     <div id="riak-events"
          phx-hook="RiakEvents"
          data-ws-url={"ws://#{@riak_admin_host}/api/stream/events"}
-         data-topics={Jason.encode!(~w(cluster ring node_stats handoff aae membership))}>
+         data-topics={Jason.encode!(~w(cluster ring node_stats handoff aae membership dcs))}>
 
       <.connection_indicator connected={@ws_connected} />
 
@@ -875,6 +911,8 @@ defmodule MyAppWeb.ClusterDashboardLive do
       <.node_stats_grid stats={@node_stats} nodes={@cluster && @cluster["nodes"]} />
 
       <.handoff_panel handoff={@handoff} />
+
+      <.dc_panel dcs={@dcs} />
 
       <.membership_log events={@membership_events} />
     </div>
@@ -985,7 +1023,7 @@ from clients that disappeared without a close handshake.
 ### Backpressure
 
 If a client falls behind (message queue exceeds `ws_backpressure_limit`,
-default 1000), the server drops the event and sends a warning frame:
+default 100), the server drops the event and sends a warning frame:
 
 ```json
 {

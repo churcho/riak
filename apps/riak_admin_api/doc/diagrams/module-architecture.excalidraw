@@ -18,7 +18,7 @@
     },
     {
       "id": "http-layer-group", "type": "rectangle",
-      "x": 20, "y": 45, "width": 520, "height": 155,
+      "x": 20, "y": 45, "width": 520, "height": 200,
       "angle": 0, "strokeColor": "#e77117", "backgroundColor": "transparent",
       "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "dashed",
       "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
@@ -420,7 +420,7 @@
     },
     {
       "id": "infra-group", "type": "rectangle",
-      "x": 575, "y": 45, "width": 215, "height": 380,
+      "x": 575, "y": 45, "width": 215, "height": 450,
       "angle": 0, "strokeColor": "#27d7b9", "backgroundColor": "transparent",
       "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "dashed",
       "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
@@ -532,6 +532,65 @@
       "text": "_event_handler\n(conflict resolution)", "fontSize": 12, "fontFamily": 1,
       "textAlign": "center", "verticalAlign": "middle", "baseline": 10,
       "containerId": "infra-event", "originalText": "_event_handler\n(conflict resolution)", "lineHeight": 1.25
+    },
+    {
+      "id": "rah-events-ws", "type": "rectangle",
+      "x": 40, "y": 162, "width": 110, "height": 32,
+      "angle": 0, "strokeColor": "#e77117", "backgroundColor": "#fae5d1",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": {"type": 3}, "seed": 550, "version": 1, "versionNonce": 550,
+      "isDeleted": false, "boundElements": [{"type": "text", "id": "rah-events-ws-text"}],
+      "updated": 1, "link": null, "locked": false
+    },
+    {
+      "id": "rah-events-ws-text", "type": "text",
+      "x": 45, "y": 170, "width": 100, "height": 16,
+      "angle": 0, "strokeColor": "#222b34", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 551, "version": 1, "versionNonce": 551,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "rah_events_ws", "fontSize": 13, "fontFamily": 1,
+      "textAlign": "center", "verticalAlign": "middle", "baseline": 12,
+      "containerId": "rah-events-ws", "originalText": "rah_events_ws", "lineHeight": 1.25
+    },
+    {
+      "id": "ws-label", "type": "text",
+      "x": 155, "y": 167, "width": 80, "height": 14,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 552, "version": 1, "versionNonce": 552,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "(WebSocket)", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "left", "verticalAlign": "top", "baseline": 10,
+      "containerId": null, "originalText": "(WebSocket)", "lineHeight": 1.25
+    },
+    {
+      "id": "infra-bridge", "type": "rectangle",
+      "x": 595, "y": 360, "width": 175, "height": 55,
+      "angle": 0, "strokeColor": "#27d7b9", "backgroundColor": "#f3faf9",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": {"type": 3}, "seed": 553, "version": 1, "versionNonce": 553,
+      "isDeleted": false, "boundElements": [{"type": "text", "id": "infra-bridge-text"}],
+      "updated": 1, "link": null, "locked": false
+    },
+    {
+      "id": "infra-bridge-text", "type": "text",
+      "x": 600, "y": 367, "width": 165, "height": 40,
+      "angle": 0, "strokeColor": "#222b34", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 554, "version": 1, "versionNonce": 554,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "_event_bridge\n(WS streaming)", "fontSize": 12, "fontFamily": 1,
+      "textAlign": "center", "verticalAlign": "middle", "baseline": 10,
+      "containerId": "infra-bridge", "originalText": "_event_bridge\n(WS streaming)", "lineHeight": 1.25
     }
   ],
   "appState": {

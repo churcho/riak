@@ -93,29 +93,28 @@ and formats the results.
                               |
                     1. Configure syn event handler
                     2. Initialize syn scope
-                    3. Start Cowboy listener
-                    4. Start supervisor
+                    3. Build listener child spec
+                    4. Start supervisor (rest_for_one)
                               |
                     +---------------------------+
                     |  riak_admin_api_sup.erl    |
-                    |  (one_for_one supervisor)  |
+                    | (rest_for_one supervisor)  |
                     +---------------------------+
-                              |
-                    +---------------------------+
-                    | riak_admin_api_coordinator |
-                    |    (gen_server worker)     |
-                    +---------------------------+
-                              |
-                    syn:register (registry)
-                    syn:join (api_nodes group)
-                    syn:join (cluster_events group)
+                     |          |            |
+            Listener    EventBridge    Coordinator
+                              |            |
+                              |     syn:register (registry)
+                              |     syn:join (api_nodes group)
                               |
               +---------------+------------------+
+              |                                  |
+    syn:local_publish/3                 syn:join/3 (WS handlers)
+    to cluster_events                   cluster_events group
               |                                  |
     +-------------------+            +-------------------------+
     | syn registry      |            | syn groups              |
     | {api_node, Node}  |            | api_nodes: discovery    |
-    | → coordinator_meta|            | cluster_events: pubsub  |
+    | → coordinator_meta|            | cluster_events: WS push |
     +-------------------+            +-------------------------+
               |                                  |
     Queried by gateway                 Queried by gateway
@@ -132,6 +131,13 @@ and formats the results.
     +-------------------+
 ```
 
+The event bridge subscribes to riak_core events and publishes
+pre-encoded JSON frames to the `cluster_events` group via
+`syn:local_publish/3`. Each WS handler process joins that group
+on connect. Because `local_publish` only reaches processes on the
+same node, each bridge instance serves only its local WS handlers.
+There is no cross-node fan-out of event frames.
+
 ---
 
 ## Module Reference
@@ -139,25 +145,33 @@ and formats the results.
 | Module | Role | syn Usage |
 |--------|------|-----------|
 | `riak_admin_api_app` | Application callback. Configures syn event handler and initializes the `riak_admin` scope before starting Cowboy and the supervisor. | `syn:add_node_to_scopes/1`, `application:set_env(syn, ...)` |
-| `riak_admin_api_coordinator` | GenServer. Owns the syn registration lifecycle. Registers in the registry and joins groups on init. Handles crash-restart with stale-key retry. | `syn:register/4`, `syn:unregister/2`, `syn:join/3,4`, `syn:publish/3` |
+| `riak_admin_api_event_bridge` | GenServer. Subscribes to riak_core events, polls timer-based data, encodes JSON once, and publishes pre-encoded frames to the `cluster_events` group via `syn:local_publish/3`. Holds latest snapshots for each topic. | `syn:local_publish/3` |
+| `riak_admin_api_coordinator` | GenServer. Owns the syn registration lifecycle. Registers in the registry and joins the `api_nodes` group on init. Handles crash-restart with stale-key retry. | `syn:register/4`, `syn:unregister/2`, `syn:join/4` |
+| `rah_events_ws` | Cowboy WebSocket handler. One process per browser tab. Joins the `cluster_events` group on connect and forwards pre-encoded event frames to the client. | `syn:join/3` |
 | `riak_admin_event_handler` | `syn_event_handler` behaviour. Logs node discovery/departure events. Resolves netsplit conflicts (oldest wins). | Callback module -- syn calls it, not the other way around. |
 | `riak_admin_api_riak` | Gateway module. Reads syn group membership for DC discovery. This is where `syn:members/2` is called. | `syn:members/2` (read-only) |
 | `rah_dcs` | HTTP handler for `/api/dcs`. Thin wrapper -- calls `riak_admin_api_riak:list_dcs/0`. | None (indirect via gateway) |
-| `riak_admin_api_sup` | Supervisor. Manages the coordinator's lifecycle with `one_for_one` strategy. | None |
+| `riak_admin_api_sup` | Supervisor. `rest_for_one` strategy: listener, event bridge, coordinator (in that order). | None |
 | `riak_admin_api_handler` | Shared HTTP response helpers (`json_reply/3`, `error_reply/4`). | None |
 
 ### syn Call Distribution
 
-syn calls are intentionally distributed across two modules:
+syn calls are distributed across three modules:
 
-- **Lifecycle calls** (register, join, unregister, publish) live in the
-  **coordinator**. These are write operations tied to the coordinator
-  process's identity.
+- **Registration lifecycle** (register, unregister, join api_nodes)
+  lives in the **coordinator**. These are identity operations tied to
+  the coordinator process.
+- **Event publishing** (local_publish to cluster_events) lives in the
+  **event bridge**. The bridge is the single producer of event frames.
+- **Group membership** (join cluster_events) lives in each
+  **rah_events_ws** handler. Each WS handler joins the group on
+  connect so it can receive events from the bridge.
 - **Query calls** (syn:members) live in the **gateway**. These are
   read operations that any handler might need.
 
 This split keeps each module's responsibility clear: the coordinator
-owns its process identity; the gateway owns data access.
+owns node identity, the bridge owns event production, WS handlers
+own event consumption, and the gateway owns data reads.
 
 ---
 
@@ -175,32 +189,47 @@ riak_admin_api_app:start/2
   |
   |-- 2. syn:add_node_to_scopes([riak_admin])
   |      Creates local ETS tables for the riak_admin scope.
-  |      Must complete BEFORE the coordinator tries to register.
+  |      Must complete BEFORE any process tries to register or join.
   |
   |-- 3. resolve_port() / resolve_riak_http_port()
   |      Detect devrel port or use configured default.
   |      Write resolved values back to app env so the coordinator
   |      reads the actual ports (not defaults) when building metadata.
   |
-  |-- 4. cowboy:start_clear(riak_admin_http, ...)
-  |      Start the HTTP listener.
+  |-- 4. Build listener child spec (ranch:child_spec/5)
+  |      Not started yet — the supervisor owns it.
   |
-  |-- 5. riak_admin_api_sup:start_link()
-  |      Start the supervisor tree.
+  |-- 5. riak_admin_api_sup:start_link(ListenerSpec)
+  |      rest_for_one supervisor. Children start in order:
   |      |
-  |      +-- riak_admin_api_coordinator:init/1
+  |      +-- [1] riak_admin_http (Cowboy listener via ranch)
+  |      |     HTTP listener must be up first.
+  |      |
+  |      +-- [2] riak_admin_api_event_bridge:init/1
+  |      |     Subscribes to riak_core ring_events and
+  |      |     node_watcher_events. Starts poll timers.
+  |      |     Publishes to cluster_events via syn:local_publish/3.
+  |      |
+  |      +-- [3] riak_admin_api_coordinator:init/1
   |            |
   |            |-- build_metadata()
   |            |     Reads DC name, ports, version from app env.
   |            |
   |            +-- register_with_syn(Meta)
-  |                  syn:register + syn:join (registry + 2 groups)
+  |                  syn:register + syn:join (registry + api_nodes)
 ```
 
-**Critical ordering constraint:** If step 1 and 2 are swapped (syn
-scope initialized before event handler is configured), syn will not
-route events to our handler. The handler must be set first because
-syn reads it during scope initialization.
+**Critical ordering constraints:**
+
+- If step 1 and 2 are swapped (syn scope initialized before event
+  handler is configured), syn will not route events to our handler.
+  The handler must be set first because syn reads it during scope
+  initialization.
+- The event bridge must start before the coordinator. The `rest_for_one`
+  strategy ensures that if the bridge crashes, the coordinator restarts
+  too. WS handlers that were connected will lose their group membership
+  when the bridge restarts and re-publishes, but they rejoin on
+  reconnect.
 
 ---
 
@@ -239,10 +268,20 @@ syn:members(riak_admin, api_nodes).
 
 ### Group: `cluster_events`
 
-Coordinators also join this group for pub/sub notifications. When
-a coordinator receives a `{cluster_event, Event}` message, it
-publishes to all group members via `syn:publish/3`. This enables
-future real-time event streaming (e.g., WebSocket push in M8).
+Used for real-time event delivery from the bridge to WebSocket
+handlers. The event bridge publishes pre-encoded JSON frames via
+`syn:local_publish(riak_admin, cluster_events, {event_frame, Topic, Frame})`.
+Each `rah_events_ws` handler joins this group on WebSocket connect
+via `syn:join(riak_admin, cluster_events, self())`.
+
+`local_publish` only reaches processes on the same Erlang node. Each
+node's bridge instance serves only that node's WS handlers. There is
+no cross-node fan-out of raw event frames — this is deliberate, since
+every node runs its own bridge and produces its own events from the
+same riak_core sources.
+
+The coordinator does *not* join this group. It only participates in
+the `api_nodes` group for discovery.
 
 ---
 
@@ -350,7 +389,6 @@ register_with_syn(Meta) ->
             ok = syn:register(?SCOPE, Key, self(), Meta)
     end,
     ok = syn:join(?SCOPE, ?GROUP_NODES, self(), Meta),
-    ok = syn:join(?SCOPE, ?GROUP_EVENTS, self()),
     ok.
 ```
 
@@ -605,21 +643,13 @@ messages to watch for:
 
 ### Cowboy Listener Cleanup
 
-If the supervisor fails during startup, the Cowboy listener is
-explicitly stopped to free the port:
+The Cowboy listener is now started under the supervisor as a ranch
+child spec. If the supervisor tree fails during startup, OTP does
+NOT call `stop/1` — but since the listener is a child of the
+supervisor, it gets terminated when the supervisor exits.
 
-```erlang
-case riak_admin_api_sup:start_link() of
-    {ok, SupPid} -> {ok, SupPid};
-    {error, Reason} ->
-        cowboy:stop_listener(riak_admin_http),
-        {error, Reason}
-end
-```
-
-This is necessary because OTP does NOT call `stop/1` when `start/2`
-fails. Without this cleanup, the port would remain bound and the
-next startup attempt would fail with `eaddrinuse`.
+On application stop, `riak_admin_api_app:stop/1` calls
+`cowboy:stop_listener(riak_admin_http)` as a safety net.
 
 ---
 
@@ -828,14 +858,29 @@ check is defensive and matches what syn actually sends.
 ### M7: KV Data Operations
 
 The admin API will add CRUD endpoints for bucket types and KV
-operations. These will go through the gateway module and won't
-interact with syn.
+operations. These go through the gateway module and don't interact
+with syn.
 
-### M8: WebSocket Event Streaming
+### M8: WebSocket Event Streaming (completed)
 
-The `cluster_events` group is already in place. M8 will add a
-WebSocket handler (`rah_events_ws`) that subscribes to the group
-and pushes events to connected clients in real-time.
+The `cluster_events` group carries real-time event frames from the
+event bridge to WebSocket handlers. See `WEBSOCKET_SPEC.md` for the
+full protocol and implementation details.
+
+Key syn details:
+
+- The event bridge (`riak_admin_api_event_bridge`) publishes to
+  `cluster_events` via `syn:local_publish/3`. The `local_publish`
+  variant only reaches processes on the same Erlang node, avoiding
+  cross-node duplication of pre-encoded frames.
+- Each `rah_events_ws` handler joins `cluster_events` on connect via
+  `syn:join/3` (no metadata needed — the bridge doesn't inspect
+  group member metadata).
+- The coordinator does not participate in `cluster_events`. Its role
+  is unchanged: registry + `api_nodes` group for discovery only.
+- Message format: `{event_frame, Topic, PreEncodedJSON}`. The bridge
+  encodes each event once; WS handlers forward the binary directly
+  without per-subscriber encoding.
 
 ### Multi-DC Health Monitoring
 
