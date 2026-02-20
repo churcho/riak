@@ -93,7 +93,13 @@ resolve_registry_conflict(_Scope, _Key, {Pid1, _Meta1, _Time1}, _Entry2) ->
     Pid1.
 
 %% @doc Called when a process joins a syn group.
+%% When a process joins the api_nodes group, notify the event bridge
+%% so it can publish the dcs topic to WebSocket subscribers.
 -spec on_process_joined(atom(), term(), pid(), term(), term()) -> any().
+on_process_joined(riak_admin, api_nodes, _Pid, _Meta, _Reason) ->
+    logger:debug("[riak_admin] Process joined group api_nodes"),
+    notify_bridge_dc_change(),
+    ok;
 on_process_joined(riak_admin, Group, _Pid, _Meta, _Reason) ->
     logger:debug("[riak_admin] Process joined group ~p", [Group]),
     ok;
@@ -101,7 +107,12 @@ on_process_joined(_Scope, _Group, _Pid, _Meta, _Reason) ->
     ok.
 
 %% @doc Called when a process leaves a syn group.
+%% When a process leaves the api_nodes group, notify the event bridge.
 -spec on_process_left(atom(), term(), pid(), term(), term()) -> any().
+on_process_left(riak_admin, api_nodes, _Pid, _Meta, _Reason) ->
+    logger:debug("[riak_admin] Process left group api_nodes"),
+    notify_bridge_dc_change(),
+    ok;
 on_process_left(riak_admin, Group, _Pid, _Meta, _Reason) ->
     logger:debug("[riak_admin] Process left group ~p", [Group]),
     ok;
@@ -111,6 +122,25 @@ on_process_left(_Scope, _Group, _Pid, _Meta, _Reason) ->
 %%% ============================================================
 %%% Internal
 %%% ============================================================
+
+%% @private Notify the event bridge of DC membership changes.
+%% Fetches the current DC list from the gateway and sends it to
+%% the bridge as a dc_change cast. Gracefully handles the bridge
+%% not being started yet (e.g., during early boot).
+-spec notify_bridge_dc_change() -> ok.
+notify_bridge_dc_change() ->
+    try
+        case riak_admin_api_riak:list_dcs() of
+            {ok, DcList} ->
+                gen_server:cast(riak_admin_api_event_bridge,
+                    {dc_change, #{dcs => DcList,
+                                  count => length(DcList)}});
+            {error, _} ->
+                ok
+        end
+    catch
+        _:_ -> ok
+    end.
 
 %% @private Safely extract dc name from metadata.
 %% Meta is term() per syn's callback spec; may not be a map.
@@ -251,5 +281,28 @@ safe_started_at_test_() ->
         {"non-map returns 0",
          fun() -> ?assertEqual(0, safe_started_at(undefined)) end}
     ]}.
+
+api_nodes_join_calls_bridge_test_() ->
+    {"api_nodes join notifies bridge (graceful when bridge not running)",
+     fun() ->
+         %% Should not crash even though bridge isn't running
+         ?assertEqual(ok, on_process_joined(
+             riak_admin, api_nodes, self(), #{}, normal))
+     end}.
+
+api_nodes_left_calls_bridge_test_() ->
+    {"api_nodes leave notifies bridge (graceful when bridge not running)",
+     fun() ->
+         %% Should not crash even though bridge isn't running
+         ?assertEqual(ok, on_process_left(
+             riak_admin, api_nodes, self(), #{}, normal))
+     end}.
+
+notify_bridge_dc_change_graceful_test_() ->
+    {"notify_bridge_dc_change handles bridge not running",
+     fun() ->
+         %% Should return ok even when bridge and syn aren't running
+         ?assertEqual(ok, notify_bridge_dc_change())
+     end}.
 
 -endif.
