@@ -43,11 +43,11 @@ Interpretation:
 
 ## Operator Configuration Example
 
-Set in runtime config for targeted cutover/rollback:
+Set in runtime config for targeted cutover/rollback (safe baseline keeps default disabled and enables only intended operation groups):
 
 ```erlang
 {riak_admin_api, [
-  {cowboy_cutover_default_mode, enabled},
+  {cowboy_cutover_default_mode, disabled},
   {cowboy_cutover_op_modes, [
     {mapred, deprecated},
     {object_item, enabled},

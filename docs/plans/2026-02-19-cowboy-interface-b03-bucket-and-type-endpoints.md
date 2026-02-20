@@ -61,13 +61,13 @@ decisions:
   - Replaced the substrate `501` stubs for `bucket_props`, `bucket_type_props`, and `buckets` operations with explicit Cowboy dispatch branches in `riak_admin_api_handler`.
   - Added `riak_admin_api_riak:bucket_operation/3` as the canonical gateway for B03 routes, using legacy Riak JSON conversion helpers for props payload parity and list-buckets semantics.
   - Preserved `/riak/:bucket` ambiguity discipline by keeping `POST ?props=false` mapped to B02 `object_collection` while B04 `keys` routes remain deferred.
-  - Implemented `buckets=stream` compatibility as aggregated legacy-style JSON chunk envelopes in the Cowboy response body.
+  - Historical B03 behavior: `buckets=stream` was implemented as aggregated legacy-style JSON chunk envelopes in the Cowboy response body.
 open_risks:
-  - Stream envelope shape is compatible, but transport remains aggregated response body instead of true incremental chunk flushing/backpressure-aware streaming.
+  - Historical B03 risk (superseded in S2): stream transport was aggregated-body instead of incremental chunking.
   - Bucket prop validation errors use normalized Cowboy error payloads (`invalid_body`/`invalid_props`) instead of every legacy text-body variant.
 handoff_notes:
   - B04 should replace deferred `keys` route handling without changing B03 bucket/type dispatch contracts or alias normalization.
-  - B04/B07 should evaluate migrating bucket stream responses from aggregated envelopes to true incremental Cowboy streaming under load.
+  - B04/B07 follow-up completed in S2: stream responses now default to incremental chunked transport with rollback toggle.
 ```
 
 ## Route Matching and Parser Discipline (required)

@@ -57,11 +57,11 @@ decisions:
   - Added explicit Cowboy route coverage for `/mapred`, `/buckets/:bucket/query`, and `/types/:bucket_type/buckets/:bucket/query` to keep route declaration and parser normalization in lockstep.
   - Normalized query and mapreduce request parsing with per-operation query allowlists (`query` none, `mapred` only `chunked`) and method contracts (`query` POST-only; `mapred` GET/HEAD/POST).
   - Implemented handler dispatch and gateway action wiring for `query` and `mapred` while preserving alias-family mapping discipline into `riak_admin_api_riak:bucket_operation/3`.
-  - Kept compatibility-first mapreduce chunked behavior using multipart envelope semantics with aggregated-body transport in this migration stage.
+  - Historical B05 behavior: mapreduce chunked transport used aggregated multipart output in this migration stage.
   - Added explicit fallback contract when legacy mapreduce backend modules are unavailable (`501 not_implemented`) instead of silent crashes.
 open_risks:
-  - MapReduce chunked responses are currently aggregated before reply, so true incremental flush/backpressure behavior remains deferred to later hardening.
-  - Timeout signaling is endpoint/backend-path dependent (`query` timeout uses object timeout mapping; mapreduce timeout remains `500 timeout`) and should be revisited in B07 parity/performance validation.
+  - Historical B05 risk (superseded in S2): mapreduce chunked responses were aggregated before reply.
+  - Historical B05 risk (superseded in S1): timeout signaling differed by path before mapreduce timeout was normalized to `503`.
   - Query cancellation and long-running operation interruption semantics remain dependent on underlying Riak client behavior and are not newly instrumented in B05.
 handoff_notes:
   - B06 should preserve B05 alias-family normalization, route->parser->internal mapping discipline, and Cowboy error envelope taxonomy.

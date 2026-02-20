@@ -18,7 +18,7 @@ Branch: `feature/cowboy-b07-verification-perf`
 - `riak_admin_api_handler:response_opts/2`
   - Passes `request_id` and `telemetry_context` to response layer.
 - `riak_admin_api_response:telemetry_tags/3`
-  - Emits telemetry tag map with `route`, `op`, `alias`, `status`, `duration_us`.
+  - Emits telemetry tag map with `route`, `op`, `alias`, `error_code`, `status`, `duration_us`.
 - `riak_admin_api_response:compat_headers/1`
   - Returns `x-request-id` on all successful/error responses.
 - `riak_admin_api_response:error_payload/4`
@@ -56,13 +56,13 @@ Required dimensions to collect and retain:
 - `route` (external matched path)
 - `op` (normalized operation)
 - `alias` (`riak|buckets|types|mapred`)
+- `error_code` (when request ends in a classified error path)
 - `status` (HTTP status)
 - `duration_us` (per-request latency)
 - `request_id` (log/header/error correlation key)
 
-Recommended extensions before B08 cutover:
+Recommended extensions for post-cutover hardening:
 
-- `error_code` (from error payload `error` field) for failure clustering.
 - `method` and `stream_mode` for hotspot diagnosis.
 - `backend_action` for operation-to-gateway cardinality checks.
 
@@ -81,6 +81,5 @@ Recommended extensions before B08 cutover:
 
 ## Known Observability Gaps
 
-- Telemetry tags currently do not include explicit error-code dimension; failures require parsing response bodies/log context.
 - Structured metrics sink is not wired in this batch; telemetry output is logger-based and must be scraped/forwarded by deployment tooling.
-- Streaming compatibility paths are currently aggregated-body responses; no chunk-level telemetry spans yet.
+- Streaming is incremental by default; chunk-level telemetry spans are still not emitted (request-level telemetry only).

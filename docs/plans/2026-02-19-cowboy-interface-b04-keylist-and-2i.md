@@ -60,9 +60,9 @@ decisions:
   - Added Cowboy route declarations for `/buckets/.../index/...` and `/types/.../index/...` so route matching and parser normalization stay in lockstep for B04.
   - Replaced deferred handler branches with concrete dispatch for `keys` and `index_query`, mapped to `riak_admin_api_riak:bucket_operation(list_keys|index_query, ...)`.
   - Added B04-specific query allowlist and coercion (`max_results`, key/index parameter families) to enforce method/query validation parity.
-  - Implemented key-list and 2i stream compatibility as aggregated envelope responses (JSON key chunks and multipart index parts) consistent with current migration-stage transport behavior.
+  - Historical B04 behavior: key-list and 2i stream compatibility was implemented as aggregated envelope responses (JSON key chunks and multipart index parts).
 open_risks:
-  - Stream responses remain aggregated in-memory payloads; true backpressure-aware chunk flushing is deferred.
+  - Historical B04 risk (superseded in S2): stream responses were aggregated in-memory payloads.
   - 2i continuation semantics rely on existing `riak_index` continuation behavior and should be load-validated under large result sets in B07.
 handoff_notes:
   - B05 should reuse the B04 query validation/allowlist discipline and stream-envelope helper patterns for query/mapreduce endpoints.

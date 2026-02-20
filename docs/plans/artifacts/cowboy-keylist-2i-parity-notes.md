@@ -21,7 +21,7 @@ Branch: `feature/cowboy-b04-keylist-2i`
 - Added 2i gateway behavior for exact/range lookups with:
   - `max_results`, `continuation`, `return_terms`, `pagination_sort`, `timeout`, `term_regex`,
   - non-stream JSON responses with continuation support,
-  - stream mode multipart envelope compatibility (`multipart/mixed;boundary=...`) in aggregated-body form.
+  - historical B04 stream mode multipart envelope compatibility (`multipart/mixed;boundary=...`) in aggregated-body form.
 - Added query allowlist + validation for B04 operations:
   - `keys` op query allowlist: `keys`, `props`, `timeout`
   - `index_query` op query allowlist: `stream`, `max_results`, `continuation`, `return_terms`, `pagination_sort`, `timeout`, `term_regex`
@@ -62,5 +62,5 @@ Branch: `feature/cowboy-b04-keylist-2i`
 
 ## Known Deviations
 
-- Stream implementations for key listing and 2i in this batch preserve compatibility envelopes but are returned as aggregated response bodies rather than true incremental chunk flushing/backpressure-aware Cowboy streaming.
+- Historical B04 state: stream implementations returned aggregated response bodies. Current baseline (S2+) uses incremental chunked streaming by default (`stream_incremental_enabled=true`) with rollback toggle support.
 - 2i validation and timeout errors are normalized to Cowboy error payload shape (`400 invalid_query`, `503 timeout`) instead of byte-for-byte legacy text body variants.

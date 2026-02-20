@@ -907,7 +907,7 @@ Content-Type: application/json
 
 **Allowed Methods:** GET, HEAD, POST
 
-**Status Codes:** 200 OK, 400 Bad Request (invalid body/query), 500 Internal Server Error (timeout, phase error), 501 Not Implemented (MapReduce backend unavailable)
+**Status Codes:** 200 OK, 400 Bad Request (invalid body/query), 500 Internal Server Error (phase/runtime error), 503 Service Unavailable (timeout or operator-disabled backend), 501 Not Implemented (MapReduce backend unavailable in build)
 
 ---
 
@@ -1193,11 +1193,12 @@ The security pipeline runs as part of request normalization, before any operatio
 
 ### TLS Enforcement
 
-When `security_require_tls` is `true`, requests must arrive via HTTPS. The check inspects the `X-Forwarded-Proto` header (for reverse proxy deployments).
+When `security_require_tls` is `true`, requests must arrive via HTTPS. Proxy headers are trusted only when `security_trust_proxy_headers=true`; otherwise TLS enforcement fails closed.
 
 ```erlang
 {riak_admin_api, [
-    {security_require_tls, true}
+    {security_require_tls, true},
+    {security_trust_proxy_headers, true}
 ]}
 ```
 
@@ -1209,7 +1210,7 @@ Non-HTTPS requests receive:
 
 ### CORS Origin Validation
 
-When `security_trusted_origins` is a non-empty list, mutating requests (`POST`, `PUT`, `DELETE`) with an `Origin` header are validated against the allowlist. Safe methods (`GET`, `HEAD`, `OPTIONS`) are exempt.
+When `security_trusted_origins` is a non-empty list, mutating requests (`POST`, `PUT`, `DELETE`) must include an `Origin` header that matches the allowlist. Safe methods (`GET`, `HEAD`, `OPTIONS`) are exempt.
 
 ```erlang
 {riak_admin_api, [
@@ -1229,7 +1230,7 @@ Register a function to run authentication. The function receives the request con
 
 ```erlang
 {riak_admin_api, [
-    {authn_fun, fun myapp_auth:check_token/1}
+    {authn_hook, fun myapp_auth:check_token/1}
 ]}
 ```
 
@@ -1237,11 +1238,11 @@ The function signature can be arity-1 (receives context) or arity-2 (receives co
 
 ### Custom Authorization Hook
 
-Same interface as `authn_fun`, but runs after authentication succeeds:
+Same interface as `authn_hook`, but runs after authentication succeeds:
 
 ```erlang
 {riak_admin_api, [
-    {authz_fun, fun myapp_auth:check_permission/1}
+    {authz_hook, fun myapp_auth:check_permission/1}
 ]}
 ```
 
@@ -1278,7 +1279,7 @@ Sets the baseline mode for all operations:
 
 ```erlang
 {riak_admin_api, [
-    {cowboy_cutover_default_mode, enabled}
+    {cowboy_cutover_default_mode, disabled}
 ]}
 ```
 
@@ -1288,7 +1289,7 @@ Override specific operation groups independently:
 
 ```erlang
 {riak_admin_api, [
-    {cowboy_cutover_default_mode, enabled},
+    {cowboy_cutover_default_mode, disabled},
     {cowboy_cutover_op_modes, [
         {object_item, deprecated},
         {bucket_props, enabled},
@@ -1330,9 +1331,9 @@ shadow      <<"shadow">>      "shadow"
 
 ### Migration Strategy
 
-1. Start with `cowboy_cutover_default_mode = enabled` (default)
-2. Route canary traffic to the Cowboy port
-3. Use `shadow` mode on operations you want to test without serving from Cowboy
+1. Start with `cowboy_cutover_default_mode = disabled` (safe default)
+2. Enable specific operation groups via `cowboy_cutover_op_modes` for canary rollout
+3. Use `shadow` mode on operations you want to observe without changing client behavior
 4. Use `deprecated` mode to log warnings for operations being migrated
 5. Use `disabled` to temporarily block operations if issues arise
 6. Use `removed` for operations permanently retired from the Cowboy path
@@ -1483,12 +1484,18 @@ All configuration is under the `riak_admin_api` application key. Set values in `
 | `http_port` | `pos_integer()` | `8099` | Port for the Cowboy HTTP listener. Auto-computed as `100N5` in devrel. |
 | `dc_name` | `binary()` | `<<"default">>` | Datacenter name advertised via syn for multi-DC discovery. |
 | `riak_http_port` | `pos_integer()` | `8098` | Local Riak HTTP port stored in syn metadata. Auto-computed as `100N8` in devrel. |
-| `cowboy_cutover_default_mode` | `atom()` | `enabled` | Default cutover mode for all operations. Values: `enabled`, `deprecated`, `shadow`, `disabled`, `removed`. |
+| `cowboy_cutover_default_mode` | `atom()` | `disabled` | Default cutover mode for all operations. Values: `enabled`, `deprecated`, `shadow`, `disabled`, `removed`. |
 | `cowboy_cutover_op_modes` | `list() \| map()` | `[]` | Per-operation cutover overrides. Proplist of `{OpAtom, Mode}` or equivalent map. |
-| `security_require_tls` | `boolean()` | `false` | Reject non-HTTPS requests (checks `X-Forwarded-Proto` header). |
+| `security_require_tls` | `boolean()` | `false` | Require HTTPS semantics for requests to proceed. |
+| `security_trust_proxy_headers` | `boolean()` | `false` | Trust `X-Forwarded-Proto`; must be `true` when TLS terminates at a trusted proxy. |
 | `security_trusted_origins` | `[binary()]` | `[]` | List of allowed `Origin` header values for mutating requests. Empty list disables check. |
-| `authn_fun` | `fun/1 \| fun/2` | `undefined` | Custom authentication hook function. |
-| `authz_fun` | `fun/1 \| fun/2` | `undefined` | Custom authorization hook function. |
+| `security_require_auth` | `boolean()` | `false` | Fail closed with `503 auth_not_configured` when auth is required but hooks are not configured. |
+| `authn_hook` | `fun/1\|fun/2\|{M,F}\|{M,F,2}` | `undefined` | Authentication hook used by request normalization. |
+| `authz_hook` | `fun/1\|fun/2\|{M,F}\|{M,F,2}` | `undefined` | Authorization hook used by request normalization. |
+| `max_request_body_bytes` | `integer()` | `5242880` | Request body size limit; larger payloads return `413 payload_too_large`. |
+| `list_keys_error_mode` | `compat\|strict` | `compat` | `compat` returns `200` with embedded error for list-keys failures; `strict` returns HTTP error status. |
+| `stream_incremental_enabled` | `boolean()` | `true` | Enable incremental chunked streaming for stream-mode keys/index/mapred/buckets responses. |
+| `mapred_backend_enabled` | `boolean()` | `true` | Operator toggle for mapreduce execution (`false` returns `503 service_unavailable`). |
 
 ### Full Example Configuration
 
@@ -1497,15 +1504,22 @@ All configuration is under the `riak_admin_api` application key. Set values in `
     {http_port, 8099},
     {dc_name, <<"us-east-1">>},
     {riak_http_port, 8098},
-    {cowboy_cutover_default_mode, enabled},
+    {cowboy_cutover_default_mode, disabled},
     {cowboy_cutover_op_modes, [
         {mapred, deprecated},
-        {keys, disabled}
+        {keys, enabled},
+        {object_item, enabled}
     ]},
     {security_require_tls, true},
+    {security_trust_proxy_headers, true},
+    {security_require_auth, true},
+    {authn_hook, fun myapp_auth:check_token/1},
+    {authz_hook, fun myapp_auth:check_permission/1},
     {security_trusted_origins, [
         <<"https://admin.example.com">>
-    ]}
+    ]},
+    {stream_incremental_enabled, true},
+    {mapred_backend_enabled, true}
 ]}
 ```
 
@@ -1617,9 +1631,9 @@ The Cowboy API provides three path families that correspond to the evolution of 
 | Request tracking | None | Auto-generated `X-Request-Id` (or client-provided) |
 | DC discovery | Not available | Built-in via `/api/dcs` |
 | Cutover controls | Not available | Per-operation mode switching |
-| Security hooks | Riak security module | Pluggable `authn_fun`/`authz_fun` functions |
+| Security hooks | Riak security module | Pluggable `authn_hook`/`authz_hook` functions |
 | CORS validation | Not available | `security_trusted_origins` allowlist |
-| TLS enforcement | Separate listener | `security_require_tls` + `X-Forwarded-Proto` |
+| TLS enforcement | Separate listener | `security_require_tls` + optional trusted proxy headers (`security_trust_proxy_headers`) |
 
 ### Behavioral Differences
 

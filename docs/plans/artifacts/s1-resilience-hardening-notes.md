@@ -110,7 +110,7 @@ Scope:
 What changed:
 
 - Added `ensure_auth_guardrails/1` in the `ensure_security` chain.
-- When `security_require_auth` is `true` (default: `false`) and no `authn_fun`/`authz_fun` is configured, requests are rejected with `503 auth_not_configured`.
+- When `security_require_auth` is `true` (default: `false`) and no auth hooks (`authn_hook`/`authz_hook`, or route-level equivalents) are configured, requests are rejected with `503 auth_not_configured`.
 - Handler `request_opts/1` now passes `require_auth` through from app env.
 
 Why safe:

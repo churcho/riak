@@ -39,7 +39,7 @@ What changed:
 - Invalid per-operation mode values in `cowboy_cutover_op_modes` now return:
   - `503`
   - `error = route_cutover_misconfigured`
-- Invalid default mode still falls back to `enabled` for backward-compatible startup behavior.
+- Current behavior (S3): invalid default mode now falls back to `disabled` with explicit error logging.
 
 Why safe:
 
@@ -49,7 +49,7 @@ Why safe:
 Verification:
 
 - `normalize_cutover_invalid_op_mode_blocks_with_config_error_test` passes.
-- `normalize_cutover_invalid_default_mode_falls_back_to_enabled_test` passes.
+- `normalize_cutover_invalid_default_mode_falls_back_to_enabled_test` is historical naming; expected behavior is now fail-closed to disabled.
 
 ## Remediations Implemented in S0
 

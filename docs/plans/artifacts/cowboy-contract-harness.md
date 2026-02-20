@@ -53,4 +53,4 @@ Provide a repeatable contract harness that verifies migrated Cowboy behavior aga
 ## Known Gaps
 
 - Harness validates parity contracts via deterministic unit/contract modules, not mixed-version dual-stack live replay against a running Webmachine node.
-- Existing stream-mode compatibility remains aggregated-body semantics (documented in B03-B06 parity notes) and is treated as accepted deviation for B07.
+- Historical B07 note: stream-mode behavior was aggregated-body at that point. Current baseline (S2+) uses incremental chunked streaming by default, with compatibility rollback toggle `stream_incremental_enabled=false`.

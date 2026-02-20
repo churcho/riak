@@ -75,7 +75,7 @@ handoff_notes:
 
 ## Known deviations
 
-- `If-Match` and `If-Unmodified-Since` are carried through request input but are not yet enforced as explicit gateway-side condition checks in this batch.
+- Historical B02 state: `If-Match` and `If-Unmodified-Since` were carried through but not enforced. Current baseline (S2+) enforces these preconditions with `412` failures when conditions do not hold.
 - Full legacy write-time Link-header validation/parsing is intentionally deferred; read-side compatibility link emission is implemented.
 
 ## Route Matching and Parser Discipline (required)

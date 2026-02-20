@@ -64,6 +64,6 @@ Branch: `feature/cowboy-b05-query-mapred`
 
 ## Known Deviations
 
-- MapReduce chunked behavior preserves compatibility multipart payload format, but response emission is currently aggregated-body output rather than incremental Cowboy chunk flushing/backpressure streaming.
+- Historical B05 state: mapreduce chunked behavior used aggregated-body multipart output. Current baseline (S2+) uses incremental chunked streaming by default, with rollback toggle `stream_incremental_enabled=false`.
 - If legacy mapreduce backend modules are absent in a build, Cowboy returns `501 not_implemented` with reason `MapReduce backend unavailable in this build`.
-- Timeout response contracts are preserved in Cowboy envelope shape, but mapreduce timeout status/code remains backend-specific (`500 timeout`) rather than normalized to a single cross-endpoint timeout status.
+- Timeout response contracts now converge on `503` for timeout scenarios (S1+), aligning mapreduce timeout behavior with query timeout semantics.

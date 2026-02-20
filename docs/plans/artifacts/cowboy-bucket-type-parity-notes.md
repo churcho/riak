@@ -62,5 +62,5 @@ Branch: `feature/cowboy-b03-bucket-type`
 
 ## Known Deviations
 
-- `buckets=stream` compatibility envelope is preserved as concatenated legacy-style JSON chunks in a single Cowboy body, not incremental chunk flushing with backpressure.
+- Historical B03 state: `buckets=stream` used concatenated aggregated envelopes. Current baseline (S2+) uses incremental chunked streaming by default, with rollback toggle `stream_incremental_enabled=false`.
 - Bucket-prop validation errors are normalized to the Cowboy substrate error shape (`invalid_body` / `invalid_props`) instead of mirroring every legacy text-body variant byte-for-byte.

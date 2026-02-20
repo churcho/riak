@@ -16,8 +16,8 @@ Security runs in this order during request normalization:
 
 1. TLS gate (`require_tls`)
 2. Origin gate (`trusted_origins` for unsafe methods)
-3. Authentication hook (`authn_fun`)
-4. Authorization hook (`authz_fun`)
+3. Authentication hook (`authn_hook`/`authn_fun`)
+4. Authorization hook (`authz_hook`/`authz_fun`)
 
 Any failure returns the standard error envelope from `cowboy-error-taxonomy.md`.
 
@@ -34,8 +34,9 @@ This is mandatory for auditability and cross-node tracing.
 ### 2) TLS requirement (configurable)
 
 - Toggle: `security_require_tls`
-- Input signal: `x-forwarded-proto`
-- If enabled and proto is not `https`: return `426 tls_required`
+- Proxy trust gate: `security_trust_proxy_headers`
+- Input signal: `x-forwarded-proto` (trusted only when proxy trust is enabled)
+- If enabled and TLS cannot be trusted/verified: return `426 tls_required`
 
 Default in B01: disabled (for parity-friendly rollout).
 
@@ -43,13 +44,13 @@ Default in B01: disabled (for parity-friendly rollout).
 
 - Control: `security_trusted_origins = [<<"https://...">>, ...]`
 - Applied only to unsafe methods (`POST`, `PUT`, `DELETE`, etc.)
-- Missing origin is tolerated; present-but-untrusted origin returns `403 forbidden`
+- Missing origin is denied for unsafe methods when trusted origins are configured; present-but-untrusted origin returns `403 forbidden`
 
 This mirrors Webmachine-era origin/referer hardening intent while keeping rollout low risk.
 
 ### 4) Authn/Authz hooks (pluggable)
 
-Request substrate accepts `authn_fun` and `authz_fun`.
+Request substrate accepts `authn_fun` and `authz_fun` in route opts, and supports app-level defaults via `authn_hook` and `authz_hook`.
 
 Supported returns:
 
@@ -69,6 +70,6 @@ In B01 these routes intentionally return `501 not_implemented` after normalizati
 
 ## Operational guidance
 
-- Keep `security_require_tls=false` during early migration testing unless ingress already guarantees TLS headers.
-- Introduce `authn_fun`/`authz_fun` in staging first and confirm taxonomy mappings before production enablement.
+- Keep `security_require_tls=false` during early migration testing unless ingress guarantees trusted TLS headers (`security_trust_proxy_headers=true`).
+- Introduce auth hooks (`authn_hook`/`authz_hook`) in staging first and confirm taxonomy mappings before production enablement.
 - Preserve `x-request-id` in logs and external gateway traces.

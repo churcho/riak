@@ -23,7 +23,7 @@ B08 adds route-level gating through request normalization options driven by app 
 Default app env in `riak_admin_api.app.src`:
 
 ```erlang
-{cowboy_cutover_default_mode, enabled},
+{cowboy_cutover_default_mode, disabled},
 {cowboy_cutover_op_modes, []}
 ```
 
@@ -40,7 +40,7 @@ Mode semantics:
 ### Stage 0: Preflight (2026-02-19)
 
 - Confirm B07 gates are still green.
-- Confirm cutover defaults are non-breaking (`enabled` + empty op overrides).
+- Confirm cutover defaults are safe (`disabled` + empty op overrides).
 - Dry-run operation-level disable/enable behavior before any production cohort.
 
 Checkpoint:
@@ -55,7 +55,7 @@ Expected:
 
 ### Stage 1: Dev cohort (2026-02-20 to 2026-02-23)
 
-- Deploy with default `enabled`.
+- Deploy with default `disabled`, then explicitly enable canary operation groups.
 - Exercise each endpoint family with contract harness.
 - Toggle one non-critical endpoint group (`mapred`) to `disabled` for 15-30 minutes in dev, validate controlled rejection, then restore `enabled`.
 
@@ -66,7 +66,7 @@ Checkpoint:
 
 ### Stage 2: Staging cohort (2026-02-24 to 2026-03-02)
 
-- Keep critical data-path groups (`object_item`, `object_collection`, `keys`, `index_query`, `counter`, `crdt_item`) in `enabled`.
+- Keep critical data-path groups (`object_item`, `object_collection`, `keys`, `index_query`, `counter`, `crdt_item`) explicitly set to `enabled` once validated.
 - Validate latency/error budgets from B07 in staging traffic profile.
 
 Checkpoint:

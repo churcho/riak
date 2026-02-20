@@ -70,7 +70,7 @@ Global verification: `All 200 tests passed`.
 ## Known Performance Risks
 
 - Benchmarks are micro-level and in-process; they do not include socket I/O, network latency, real Riak cluster contention, or multi-node fanout.
-- Stream-mode endpoints still use aggregated-body compatibility responses, so chunk/backpressure behavior remains a known gap for production-scale traffic.
+- Stream-mode endpoints now use incremental chunked streaming by default (`stream_incremental_enabled=true`); production-scale load validation is still required for sustained throughput and tail-latency behavior.
 
 ---
 

@@ -85,5 +85,5 @@ Non-object substrate operations remain deferred and continue to return explicit 
 
 ## Known deviations
 
-- `If-Match` and `If-Unmodified-Since` are forwarded through handler input but are not yet translated into explicit gateway-side conditional checks in B02.
+- Historical B02 state: `If-Match` and `If-Unmodified-Since` were forwarded but not enforced. Current baseline (S2+) enforces these preconditions via gateway-side read-before-write checks.
 - Link-header parsing for writes is intentionally conservative in this batch; read-side link emission is preserved, but full legacy write-time link validation/parsing parity remains for follow-up hardening.

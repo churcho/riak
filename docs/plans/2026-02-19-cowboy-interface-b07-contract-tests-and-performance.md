@@ -48,17 +48,15 @@ Prove functional parity and performance readiness for Cowboy endpoints before cu
 - Test command outputs stored in artifact docs.
 - Benchmark runs with configuration details and repeatability notes.
 
-## Known deviations and risk acceptance
+## Known deviations and risk acceptance (historical B07 snapshot)
 
-- Streaming compatibility modes (`keys=stream`, 2i `stream=true`, mapreduce `chunked=true`) remain aggregated-body compatibility responses.
-  - Risk acceptance: accepted for B07 because this matches B03-B06 documented behavior and contract tests.
-  - Mitigation: B08 cutover gate requires explicit production-like stream load verification.
+- Streaming compatibility modes were aggregated-body at B07 time.
+  - Resolution: superseded in S2 with incremental chunked streaming by default (`stream_incremental_enabled=true`, rollback toggle available).
 - Performance probe is synthetic/in-process and does not represent full network + cluster contention behavior.
   - Risk acceptance: accepted as baseline-only evidence for B07.
   - Mitigation: run staged cluster load validation before/at B08 cutover.
-- Telemetry tags do not currently include explicit `error_code` dimension in the emitted tag map.
-  - Risk acceptance: accepted for B07 because request-id + status + route/op correlation exists.
-  - Mitigation: add structured error-code dimension before full cutover observability SLO enforcement.
+- Telemetry `error_code` dimension gap was present at B07 time.
+  - Resolution: superseded in D01 by explicit `error_code` tagging on telemetry/error context.
 
 ## Context Capsule (update at completion)
 

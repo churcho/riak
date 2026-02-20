@@ -137,9 +137,10 @@ Why this matters:
 - Mitigation: use `cowboy:child_spec/3` under supervisor.
 
 ### SD-004: MapReduce/query timeout contract unification
-- Query timeout returns 503; mapred timeout returns 500.
+- Historical S0 state: query timeout returned 503 while mapred timeout returned 500.
 - Inconsistent client contract.
 - Mitigation: unify to 503 or explicitly document intentional divergence.
+- Current status: superseded in S1; mapreduce timeout now returns 503.
 
 ## New Configuration Keys
 

@@ -24,7 +24,7 @@ Use `cowboy_cutover_op_modes` for targeted rollback.
 - `removed` returns `410 route_removed` for that endpoint group.
 - `enabled` restores normal behavior.
 
-Keep `cowboy_cutover_default_mode=enabled` during normal operations; do not use global disable in production except full emergency stop.
+Keep `cowboy_cutover_default_mode=disabled` as baseline and explicitly enable stable operation groups via `cowboy_cutover_op_modes`.
 
 ## Endpoint-Group Rollback Matrix
 
