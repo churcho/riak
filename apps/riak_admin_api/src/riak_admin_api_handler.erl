@@ -632,6 +632,21 @@ with_request_body(Req, HandlerFun, ReplyOpts) ->
     case read_request_body(Req) of
         {ok, Body, Req1} ->
             HandlerFun(Body, Req1);
+        {error, body_too_large, Req1} ->
+            MaxBody = application:get_env(riak_admin_api,
+                                           max_request_body_bytes,
+                                           5 * 1024 * 1024),
+            riak_admin_api_response:reply_error_map(
+                with_request_id(
+                    #{
+                        status => 413,
+                        code => <<"payload_too_large">>,
+                        reason => iolist_to_binary(io_lib:format(
+                            "Request body exceeds maximum allowed size (~B bytes)",
+                            [MaxBody]))
+                    },
+                    ReplyOpts),
+                Req1);
         {error, Reason, Req1} ->
             riak_admin_api_response:reply_error_map(
                 with_request_id(
@@ -717,17 +732,30 @@ read_request_body(Req = #{body := Body}) when is_list(Body) ->
 read_request_body(Req = #{body := undefined}) ->
     {ok, <<>>, Req};
 read_request_body(Req0) ->
-    try read_request_body_chunks(Req0, [])
+    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
+                                   5 * 1024 * 1024), %% 5 MiB default
+    try read_request_body_chunks(Req0, [], 0, MaxBody)
     catch
-        Class:Reason -> {error, {Class, Reason}, Req0}
+        throw:body_too_large ->
+            {error, body_too_large, Req0};
+        Class:Reason ->
+            {error, {Class, Reason}, Req0}
     end.
 
-read_request_body_chunks(Req0, Acc) ->
+read_request_body_chunks(Req0, Acc, AccSize, MaxBody) ->
     case cowboy_req:read_body(Req0) of
         {ok, Body, Req1} ->
-            {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req1};
+            NewSize = AccSize + byte_size(Body),
+            case NewSize > MaxBody of
+                true -> throw(body_too_large);
+                false -> {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req1}
+            end;
         {more, Body, Req1} ->
-            read_request_body_chunks(Req1, [Body | Acc])
+            NewSize = AccSize + byte_size(Body),
+            case NewSize > MaxBody of
+                true -> throw(body_too_large);
+                false -> read_request_body_chunks(Req1, [Body | Acc], NewSize, MaxBody)
+            end
     end.
 
 base_backend_input(Context) ->
@@ -820,6 +848,10 @@ request_opts(RouteOpts) ->
         _ -> #{}
     end,
     DefaultRequireTLS = application:get_env(riak_admin_api, security_require_tls, false),
+    DefaultTrustProxyHeaders = application:get_env(
+        riak_admin_api,
+        security_trust_proxy_headers,
+        false),
     DefaultTrustedOrigins = application:get_env(
         riak_admin_api,
         security_trusted_origins,
@@ -834,6 +866,7 @@ request_opts(RouteOpts) ->
         []),
     RouteMap#{
         require_tls => maps:get(require_tls, RouteMap, DefaultRequireTLS),
+        trust_proxy_headers => maps:get(trust_proxy_headers, RouteMap, DefaultTrustProxyHeaders),
         trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins),
         cutover_default_mode => maps:get(
             cutover_default_mode,

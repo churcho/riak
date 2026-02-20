@@ -234,3 +234,46 @@ crdt_decode_update_body_rejects_invalid_payload_test() ->
         set, <<"{\"increment\":1}">>),
     ?assertEqual(400, maps:get(status, Error)),
     ?assertEqual(<<"invalid_body">>, maps:get(code, Error)).
+
+%%% ============================================================
+%%% accept_doc_value/2 safe term decoding (S0 security)
+%%% ============================================================
+
+accept_doc_value_safe_term_decode_test() ->
+    %% A valid Erlang binary term should decode correctly.
+    Term = {hello, [1, 2, 3]},
+    Encoded = term_to_binary(Term),
+    ?assertEqual(Term,
+        riak_admin_api_riak:accept_doc_value(
+            <<"application/x-erlang-binary">>, Encoded)).
+
+accept_doc_value_corrupted_binary_returns_raw_body_test() ->
+    %% Corrupted/invalid binary should return the raw body, not crash.
+    Body = <<"not-valid-erlang-binary">>,
+    ?assertEqual(Body,
+        riak_admin_api_riak:accept_doc_value(
+            <<"application/x-erlang-binary">>, Body)).
+
+accept_doc_value_rejects_atom_creation_payload_test() ->
+    %% Craft a raw ETF payload containing an atom name that does NOT exist
+    %% in the atom table. With [safe], binary_to_term refuses to create
+    %% new atoms, so accept_doc_value should fall back to returning the
+    %% raw body instead of creating the atom.
+    %%
+    %% ETF format: <<131, 100, Len:16, AtomName/binary>>
+    %% (ATOM_EXT = 100, followed by 2-byte big-endian length + name)
+    FakeAtomName = <<"__s0_exploit_atom_injection_test_unique_42__">>,
+    Len = byte_size(FakeAtomName),
+    CraftedPayload = <<131, 100, Len:16, FakeAtomName/binary>>,
+    %% With [safe], this must fail since the atom doesn't exist.
+    %% accept_doc_value should catch the error and return raw body.
+    Result = riak_admin_api_riak:accept_doc_value(
+        <<"application/x-erlang-binary">>, CraftedPayload),
+    ?assertEqual(CraftedPayload, Result).
+
+accept_doc_value_non_erlang_passthrough_test() ->
+    %% Non-erlang-binary content types should pass through unchanged.
+    Body = <<"{\"key\":\"value\"}">>,
+    ?assertEqual(Body,
+        riak_admin_api_riak:accept_doc_value(
+            <<"application/json">>, Body)).

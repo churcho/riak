@@ -3,22 +3,36 @@
 %%
 %% No other module in riak_admin_api may call Riak internals
 %% directly. This is the cornerstone of the isolation pattern
-%% that makes the admin API extractable to its own repository.
+%% that keeps the admin API's surface area contained.
 %%
 %% == Why this matters ==
 %%
 %% <ul>
 %%   <li>The .app.src never lists riak_core or riak_kv as
-%%       dependencies — they are resolved at runtime only.</li>
-%%   <li>`rebar3 compile' works without Riak source present
-%%       (Erlang resolves module calls at runtime, not compile
-%%       time).</li>
+%%       `applications' dependencies — they are resolved at
+%%       runtime only.</li>
 %%   <li>Every handler is testable in isolation — swap this
 %%       gateway for a mock and Cowboy still works.</li>
-%%   <li>Extraction to a standalone repo is mechanical: copy
-%%       the directory, change path to git in Riak's
-%%       rebar.config, done.</li>
+%%   <li>Extraction to a standalone repo requires copying the
+%%       directory and providing riak_kv headers at compile
+%%       time (see compile-time dependency note below).</li>
 %% </ul>
+%%
+%% == Compile-time dependency note ==
+%%
+%% This module has compile-time dependencies on riak_kv headers:
+%%   - riak_kv/src/riak_kv_wm_raw.hrl  (JSON field macros)
+%%   - riak_kv/include/riak_kv_index.hrl (index query macros)
+%%   - riak_kv/include/riak_kv_types.hrl (CRDT record defs)
+%%
+%% These -include_lib directives mean `rebar3 compile' requires
+%% riak_kv source to be present on the code path. The runtime
+%% isolation principle still holds: no module other than this
+%% gateway calls riak_kv functions directly.
+%%
+%% Future work: replace these include_lib dependencies with
+%% locally defined records/macros to achieve full compile-time
+%% isolation.
 %%
 %% == Isolation check ==
 %%
@@ -73,7 +87,8 @@
     build_location/2,
     counter_delta_from_body/1,
     crdt_decode_update_body/2,
-    crdt_response_body/4
+    crdt_response_body/4,
+    accept_doc_value/2
 ]).
 -endif.
 
@@ -479,7 +494,7 @@ trim_binary(Bin) when is_binary(Bin) ->
     list_to_binary(string:trim(binary_to_list(Bin))).
 
 accept_doc_value(<<"application/x-erlang-binary">>, Body) ->
-    try binary_to_term(Body)
+    try binary_to_term(Body, [safe])
     catch
         _:_ -> Body
     end;

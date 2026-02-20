@@ -649,14 +649,28 @@ detect_stream_mode(Query) ->
 ensure_tls(Context, Opts) ->
     case maps:get(require_tls, Opts, false) of
         true ->
-            Headers = maps:get(headers, Context, #{}),
-            case maps:get(<<"x-forwarded-proto">>, Headers, <<"http">>) of
-                <<"https">> -> ok;
-                _ ->
+            %% Only trust X-Forwarded-Proto when proxy trust is explicitly
+            %% enabled. Without trust_proxy_headers => true, the header is
+            %% client-supplied and MUST be ignored (S0 hardening).
+            case maps:get(trust_proxy_headers, Opts, false) of
+                true ->
+                    Headers = maps:get(headers, Context, #{}),
+                    case maps:get(<<"x-forwarded-proto">>, Headers, <<"http">>) of
+                        <<"https">> -> ok;
+                        _ ->
+                            {error, #{
+                                status => 426,
+                                code => <<"tls_required">>,
+                                reason => <<"TLS is required for this endpoint">>
+                            }}
+                    end;
+                false ->
+                    %% Proxy trust disabled: TLS is required but we have no
+                    %% trustworthy signal that TLS is in use. Fail closed.
                     {error, #{
                         status => 426,
                         code => <<"tls_required">>,
-                        reason => <<"TLS is required for this endpoint">>
+                        reason => <<"TLS is required and proxy header trust is not enabled">>
                     }}
             end;
         false ->
@@ -675,7 +689,16 @@ ensure_origin(Context, Opts) ->
             Headers = maps:get(headers, Context, #{}),
             Origin = maps:get(<<"origin">>, Headers, undefined),
             case Origin of
-                undefined -> ok;
+                undefined ->
+                    %% S0 hardening: when trusted_origins is configured and the
+                    %% method is unsafe, a missing Origin header is denied.
+                    %% This prevents non-browser clients from bypassing origin
+                    %% checks on mutating operations.
+                    {error, #{
+                        status => 403,
+                        code => <<"forbidden">>,
+                        reason => <<"Origin header is required for unsafe methods when origin policy is configured">>
+                    }};
                 _ when is_binary(Origin) ->
                     case lists:member(Origin, TrustedOrigins) of
                         true -> ok;

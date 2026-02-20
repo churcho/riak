@@ -148,6 +148,73 @@ json_reply_fallback_on_encode_error_test() ->
     ?assertEqual(<<"json_encoding_error">>, maps:get(<<"error">>, Decoded)),
     ?assertEqual(<<"{error,badarg}">>, maps:get(<<"reason">>, Decoded)).
 
+%%% ============================================================
+%%% S0: Request body size limit enforcement
+%%% ============================================================
+
+body_size_limit_rejects_oversized_body_test() ->
+    %% Set a very small limit for testing.
+    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
+    application:set_env(riak_admin_api, max_request_body_bytes, 64),
+    try
+        OversizedBody = binary:copy(<<"x">>, 128),
+        StreamID = {body_limit_test, make_ref()},
+        Req0 = #{
+            method => <<"PUT">>,
+            path => <<"/buckets/users/keys/alice">>,
+            headers => #{<<"x-request-id">> => <<"rid-body-limit">>},
+            body => OversizedBody,
+            pid => self(),
+            streamid => StreamID
+        },
+        Opts = #{
+            cutover_default_mode => enabled,
+            object_backend => fun(put, _Ctx, _Input) ->
+                {ok, #{status => 204, body => <<>>}}
+            end
+        },
+        {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
+        ok
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
+            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
+        end
+    end.
+
+body_size_limit_allows_within_limit_body_test() ->
+    %% Ensure bodies within the limit pass through.
+    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
+    application:set_env(riak_admin_api, max_request_body_bytes, 1024),
+    try
+        SmallBody = <<"small payload">>,
+        StreamID = {body_ok_test, make_ref()},
+        Req0 = #{
+            method => <<"PUT">>,
+            path => <<"/buckets/users/keys/alice">>,
+            headers => #{<<"x-request-id">> => <<"rid-body-ok">>},
+            body => SmallBody,
+            pid => self(),
+            streamid => StreamID
+        },
+        Opts = #{
+            cutover_default_mode => enabled,
+            object_backend => fun(put, _Ctx, Input) ->
+                %% Verify the body was passed through.
+                ?assertEqual(SmallBody, maps:get(body, Input)),
+                {ok, #{status => 204, body => <<>>}}
+            end
+        },
+        {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
+        {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
+        ?assertEqual(204, Status)
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
+            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
+        end
+    end.
+
 expected_method_not_allowed_reason(Method) ->
     iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])).
 

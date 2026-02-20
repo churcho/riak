@@ -9,12 +9,15 @@
 %% == Isolation principle ==
 %%
 %% The `applications' list deliberately excludes riak_core and
-%% riak_kv. Those are the runtime host, not compile-time
+%% riak_kv. Those are the runtime host, not OTP application
 %% dependencies. All calls to Riak internals go through a single
 %% gateway module (riak_admin_api_riak.erl) which resolves them
-%% at runtime. This means `rebar3 compile' works without Riak
-%% source present, and the app can be extracted to its own repo
-%% by changing one line in Riak's rebar.config (path -> git).
+%% at runtime.
+%%
+%% Note: the gateway module has compile-time dependencies on
+%% riak_kv headers (-include_lib). This means riak_kv source
+%% must be on the code path at compile time. See the gateway
+%% module docs for details and future extraction plan.
 %%
 %% The `mod' tuple tells OTP to call riak_admin_api_app:start/2
 %% when the application boots. The `env' section provides default
@@ -39,7 +42,11 @@
         {http_port, 8099},        %% Default admin API port; distinct from Riak HTTP (10018)
         {dc_name, <<"default">>}, %% Datacenter name for multi-DC identification
         {riak_http_port, 8098},   %% Local Riak HTTP port (for DC metadata)
-        {cowboy_cutover_default_mode, enabled},
+        %% S0 hardening: substrate/data-path routes are disabled by default.
+        %% Operators must explicitly set cowboy_cutover_default_mode => enabled
+        %% or enable individual ops via cowboy_cutover_op_modes to expose
+        %% substrate endpoints on the admin port.
+        {cowboy_cutover_default_mode, disabled},
         {cowboy_cutover_op_modes, []}
     ]},
     {modules, []}

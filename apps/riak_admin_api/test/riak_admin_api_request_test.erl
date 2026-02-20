@@ -506,3 +506,139 @@ pick_query_canonical(Context) ->
         bucket => maps:get(bucket, Context),
         key => maps:get(key, Context)
     }.
+
+%%% ============================================================
+%%% S0: TLS / proxy trust hardening
+%%% ============================================================
+
+tls_required_without_proxy_trust_rejects_spoofed_header_test() ->
+    %% When require_tls is true but trust_proxy_headers is false (default),
+    %% a spoofed X-Forwarded-Proto: https header must be REJECTED.
+    Context = #{
+        headers => #{<<"x-forwarded-proto">> => <<"https">>},
+        method => <<"GET">>
+    },
+    Opts = #{require_tls => true},
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(426, maps:get(status, Err)),
+    ?assertEqual(<<"tls_required">>, maps:get(code, Err)).
+
+tls_required_with_proxy_trust_accepts_https_header_test() ->
+    %% When trust_proxy_headers is explicitly true AND the header says https,
+    %% the request is accepted.
+    Context = #{
+        headers => #{<<"x-forwarded-proto">> => <<"https">>},
+        method => <<"GET">>
+    },
+    Opts = #{require_tls => true, trust_proxy_headers => true},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+tls_required_with_proxy_trust_rejects_http_header_test() ->
+    %% Even with proxy trust enabled, X-Forwarded-Proto: http is rejected.
+    Context = #{
+        headers => #{<<"x-forwarded-proto">> => <<"http">>},
+        method => <<"GET">>
+    },
+    Opts = #{require_tls => true, trust_proxy_headers => true},
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(426, maps:get(status, Err)).
+
+tls_not_required_allows_any_request_test() ->
+    %% When require_tls is false, everything passes regardless.
+    Context = #{headers => #{}, method => <<"GET">>},
+    Opts = #{require_tls => false},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+%%% ============================================================
+%%% S0: Substrate routes disabled by default
+%%% ============================================================
+
+substrate_disabled_by_default_blocks_data_path_test() ->
+    %% With no cutover opts (simulating app defaults with disabled default),
+    %% substrate data-path ops should be blocked.
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-substrate-default">>}
+    },
+    %% Opts with disabled default (matching new app.src default)
+    Opts = #{cutover_default_mode => disabled},
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"route_cutover_disabled">>, maps:get(code, Err)).
+
+substrate_explicit_enable_overrides_disabled_default_test() ->
+    %% Operators can explicitly enable specific operations.
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{<<"x-request-id">> => <<"rid-substrate-enable">>}
+    },
+    Opts = #{
+        cutover_default_mode => disabled,
+        cutover_op_modes => #{object_item => enabled}
+    },
+    {ok, Context, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(object_item, maps:get(op, Context)).
+
+substrate_mapred_blocked_by_default_disabled_test() ->
+    Req0 = #{
+        method => <<"POST">>,
+        path => <<"/mapred">>,
+        headers => #{<<"x-request-id">> => <<"rid-mapred-default">>}
+    },
+    Opts = #{cutover_default_mode => disabled},
+    {error, Err, _Req1} = riak_admin_api_request:normalize(Req0, Opts),
+    ?assertEqual(503, maps:get(status, Err)),
+    ?assertEqual(<<"route_cutover_disabled">>, maps:get(code, Err)).
+
+%%% ============================================================
+%%% S0: Origin policy hardening (missing Origin on unsafe methods)
+%%% ============================================================
+
+origin_missing_on_unsafe_method_denied_when_origins_configured_test() ->
+    %% When trusted_origins is configured and method is POST (unsafe),
+    %% a missing Origin header should be denied.
+    Context = #{
+        method => <<"POST">>,
+        headers => #{}
+    },
+    Opts = #{trusted_origins => [<<"https://admin.example.com">>]},
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(403, maps:get(status, Err)),
+    ?assertEqual(<<"forbidden">>, maps:get(code, Err)).
+
+origin_present_and_trusted_on_unsafe_method_allowed_test() ->
+    Context = #{
+        method => <<"PUT">>,
+        headers => #{<<"origin">> => <<"https://admin.example.com">>}
+    },
+    Opts = #{trusted_origins => [<<"https://admin.example.com">>]},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+origin_present_but_untrusted_on_unsafe_method_denied_test() ->
+    Context = #{
+        method => <<"DELETE">>,
+        headers => #{<<"origin">> => <<"https://evil.example.com">>}
+    },
+    Opts = #{trusted_origins => [<<"https://admin.example.com">>]},
+    {error, Err} = riak_admin_api_request:ensure_security(Context, Opts),
+    ?assertEqual(403, maps:get(status, Err)).
+
+origin_missing_on_safe_method_allowed_when_origins_configured_test() ->
+    %% Safe methods (GET, HEAD) should always pass origin check.
+    Context = #{
+        method => <<"GET">>,
+        headers => #{}
+    },
+    Opts = #{trusted_origins => [<<"https://admin.example.com">>]},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).
+
+origin_not_checked_when_trusted_origins_empty_test() ->
+    %% When trusted_origins is empty, no origin check is performed.
+    Context = #{
+        method => <<"POST">>,
+        headers => #{}
+    },
+    Opts = #{trusted_origins => []},
+    ?assertEqual(ok, riak_admin_api_request:ensure_security(Context, Opts)).

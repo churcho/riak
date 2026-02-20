@@ -1,9 +1,9 @@
-# Cowboy Critical Remediation Notes (D01)
+# Cowboy Critical Remediation Notes (D01 + S0)
 
 Date: 2026-02-20
-Status: D01 pass notes
+Status: D01 + S0 pass notes
 
-## Remediations Implemented in This Pass
+## Remediations Implemented in D01
 
 ### R-001: Telemetry `error_code` dimension
 
@@ -50,6 +50,130 @@ Verification:
 
 - `normalize_cutover_invalid_op_mode_blocks_with_config_error_test` passes.
 - `normalize_cutover_invalid_default_mode_falls_back_to_enabled_test` passes.
+
+## Remediations Implemented in S0
+
+### S0-001: Unsafe `binary_to_term` (CG-009)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+- `apps/riak_admin_api/test/riak_admin_api_riak_test.erl`
+
+What changed:
+
+- `binary_to_term(Body)` → `binary_to_term(Body, [safe])` in `accept_doc_value/2`.
+
+Why safe:
+
+- Only affects Erlang binary term deserialization path. Valid pre-existing atoms still decode. Corrupted/malicious payloads fall back to raw body (existing behavior for decode failures).
+
+Verification:
+
+- `accept_doc_value_safe_term_decode_test` passes.
+- `accept_doc_value_rejects_atom_creation_payload_test` passes.
+
+### S0-002: TLS header spoofing / proxy trust (CG-010)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_request.erl`
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+- `apps/riak_admin_api/test/riak_admin_api_request_test.erl`
+
+What changed:
+
+- `ensure_tls/2` now requires `trust_proxy_headers => true` before trusting `X-Forwarded-Proto`.
+- New config key: `security_trust_proxy_headers` (default: `false`).
+- Without proxy trust, `require_tls => true` fails closed.
+
+Why safe:
+
+- Default behavior change: previously TLS check could be spoofed; now it fails closed. Operators who need proxy trust must explicitly enable it.
+
+Verification:
+
+- `tls_required_without_proxy_trust_rejects_spoofed_header_test` passes.
+- `tls_required_with_proxy_trust_accepts_https_header_test` passes.
+
+### S0-003: Request body size limits (CG-011)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+- `apps/riak_admin_api/test/riak_admin_api_handler_test.erl`
+
+What changed:
+
+- `read_request_body_chunks` tracks accumulated size, throws on limit breach.
+- `with_request_body` handles `body_too_large` with HTTP 413.
+- Configurable via `max_request_body_bytes` (default: 5 MiB).
+
+Why safe:
+
+- Only affects oversized request bodies. Normal requests within limit are unaffected.
+
+Verification:
+
+- `body_size_limit_allows_within_limit_body_test` passes.
+
+### S0-004: Substrate routes disabled by default (CG-012)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api.app.src`
+- `apps/riak_admin_api/test/riak_admin_api_request_test.erl`
+
+What changed:
+
+- `cowboy_cutover_default_mode` default changed from `enabled` to `disabled`.
+- Admin routes (`/api/...`) unaffected; they use `rah_*` handlers outside cutover control.
+
+Why safe:
+
+- Breaking change for operators who relied on substrate routes being open. This is intentional — operators must now explicitly enable substrate data-path endpoints.
+
+Verification:
+
+- `substrate_disabled_by_default_blocks_data_path_test` passes.
+- `substrate_explicit_enable_overrides_disabled_default_test` passes.
+
+### S0-005: Origin policy hardening (CG-013)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_request.erl`
+- `apps/riak_admin_api/test/riak_admin_api_request_test.erl`
+
+What changed:
+
+- Missing `Origin` header on unsafe methods now denied when `trusted_origins` is configured.
+
+Why safe:
+
+- Only affects deployments with `trusted_origins` configured (not the default empty list). Safe methods remain unaffected.
+
+Verification:
+
+- `origin_missing_on_unsafe_method_denied_when_origins_configured_test` passes.
+- `origin_not_checked_when_trusted_origins_empty_test` passes.
+
+### S0-006: Compile-time isolation docs (CG-014)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl` (module docs)
+- `apps/riak_admin_api/src/riak_admin_api.app.src` (isolation principle docs)
+
+What changed:
+
+- Corrected false claim about compile-time independence from riak_kv.
+- Documented actual `-include_lib` dependencies on riak_kv headers.
+- Added future work note for full compile-time isolation.
+
+Why safe:
+
+- Documentation-only change; no runtime behavior modification.
 
 ## Deferred Remediation Plans
 
@@ -99,3 +223,28 @@ Acceptance criteria:
 - Publish explicit parity decision.
 - If alias is added: route/parser/internal mapping evidence and compatibility tests.
 - If alias is rejected: document rationale and migration guidance.
+
+### SD-001: net_adm:ping sequential latency (CG-015)
+
+Acceptance criteria:
+
+- Async or parallel pings with timeout ceiling.
+- Cached reachability with TTL to bound response time.
+
+### SD-002: Stream collection handler blocking (CG-016)
+
+Acceptance criteria:
+
+- Separate collection process with backpressure.
+- Handler process freed immediately after spawning collector.
+
+### SD-003: Listener supervision architecture (CG-017)
+
+Acceptance criteria:
+
+- Move Cowboy listener under supervisor using `cowboy:child_spec/3`.
+- Crash recovery test.
+
+### SD-004: Timeout contract unification (CG-018)
+
+See D-003 / CG-005.
