@@ -11,7 +11,10 @@ init(Req0, RouteOpts) ->
     Opts = request_opts(RouteOpts),
     case normalize_request(Req0, Opts) of
         {ok, Context, Req1} ->
-            ReplyOpts = response_opts(Context, #{}),
+            %% S5 (M-4): Thread trusted_origins into reply opts for CORS
+            CorsExtra = #{trusted_origins =>
+                maps:get(trusted_origins, Opts, [])},
+            ReplyOpts = response_opts(Context, CorsExtra),
             Req2 = dispatch(Context, Req1, Opts, ReplyOpts),
             {ok, Req2, RouteOpts};
         {error, Error, Req1} ->
@@ -798,12 +801,28 @@ decode_json_object(Body) ->
             {error, <<"Body must be a JSON object">>}
     end.
 
-read_request_body(Req = #{body := Body}) when is_binary(Body) ->
-    {ok, Body, Req};
-read_request_body(Req = #{body := Body}) when is_list(Body) ->
-    {ok, iolist_to_binary(Body), Req};
+%% S5 (M-6): Body size enforcement consistency.
+%% The #{body := Body} fast path (used in tests and for pre-read bodies)
+%% now enforces the same max_request_body_bytes limit as the chunked
+%% Cowboy read path. This prevents accidental bypass of body size limits
+%% when a body value is injected into the request map.
 read_request_body(Req = #{body := undefined}) ->
     {ok, <<>>, Req};
+read_request_body(Req = #{body := Body}) when is_binary(Body) ->
+    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
+                                   5 * 1024 * 1024),
+    case byte_size(Body) > MaxBody of
+        true -> {error, body_too_large, Req};
+        false -> {ok, Body, Req}
+    end;
+read_request_body(Req = #{body := Body}) when is_list(Body) ->
+    Bin = iolist_to_binary(Body),
+    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
+                                   5 * 1024 * 1024),
+    case byte_size(Bin) > MaxBody of
+        true -> {error, body_too_large, Req};
+        false -> {ok, Bin, Req}
+    end;
 read_request_body(Req0) ->
     MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
                                    5 * 1024 * 1024), %% 5 MiB default
@@ -974,10 +993,13 @@ req_response_opts(Req) ->
     end.
 
 response_opts(Context, Extra) ->
+    Headers = maps:get(headers, Context, #{}),
     maps:merge(
         #{
             request_id => maps:get(request_id, Context, <<"unknown">>),
-            telemetry_context => Context
+            telemetry_context => Context,
+            %% S5 (M-4): Pass origin through for CORS response headers
+            request_origin => maps:get(<<"origin">>, Headers, undefined)
         },
         Extra).
 

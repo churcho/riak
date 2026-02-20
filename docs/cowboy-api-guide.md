@@ -716,6 +716,8 @@ Response:
 
 Streaming responses emit multiple JSON chunks, each containing a `keys` array. The stream terminates with an empty keys array `{"keys": []}` or a timeout error `{"error": "timeout"}`.
 
+**Stream Error Framing (S5):** All stream error paths (bucket listing, key listing, index queries, and MapReduce) use a consistent JSON error shape: `{"error": "<reason>"}`. This is emitted as the final chunk in the stream. For multipart responses (index and MapReduce), the error is wrapped in a multipart boundary part with `Content-Type: application/json`.
+
 **Allowed Methods:** GET, HEAD
 
 ---
@@ -1224,6 +1226,18 @@ Untrusted origins receive:
 {"status": 403, "error": "forbidden", "reason": "Origin is not allowed"}
 ```
 
+#### CORS Response Headers (S5)
+
+When `security_trusted_origins` is configured and the request `Origin` matches an entry, the response includes standard CORS headers:
+
+- `Access-Control-Allow-Origin`: the matched origin value
+- `Access-Control-Allow-Methods`: `GET, HEAD, PUT, POST, DELETE, OPTIONS`
+- `Access-Control-Allow-Headers`: `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin`
+- `Access-Control-Expose-Headers`: `X-Request-Id, X-Riak-Vclock, ETag, Last-Modified, Link, Location`
+- `Access-Control-Max-Age`: `3600`
+
+When `security_trusted_origins` is empty (the default), no CORS headers are emitted. When the origin does not match, no CORS headers are emitted (the 403 rejection from origin validation takes precedence for unsafe methods; safe methods pass through without CORS headers).
+
 ### Custom Authentication Hook
 
 Register a function to run authentication. The function receives the request context and must return one of: `ok`, `allow`, `unauthorized`, `forbidden`, or `{deny, Status, Code, Reason}`.
@@ -1492,7 +1506,7 @@ All configuration is under the `riak_admin_api` application key. Set values in `
 | `security_require_auth` | `boolean()` | `false` | Fail closed with `503 auth_not_configured` when auth is required but hooks are not configured. |
 | `authn_hook` | `fun/1\|fun/2\|{M,F}\|{M,F,2}` | `undefined` | Authentication hook used by request normalization. |
 | `authz_hook` | `fun/1\|fun/2\|{M,F}\|{M,F,2}` | `undefined` | Authorization hook used by request normalization. |
-| `max_request_body_bytes` | `integer()` | `5242880` | Request body size limit; larger payloads return `413 payload_too_large`. |
+| `max_request_body_bytes` | `integer()` | `5242880` | Request body size limit; larger payloads return `413 payload_too_large`. Enforced on both chunked reads and pre-populated body paths (S5). |
 | `list_keys_error_mode` | `compat\|strict` | `compat` | `compat` returns `200` with embedded error for list-keys failures; `strict` returns HTTP error status. |
 | `stream_incremental_enabled` | `boolean()` | `true` | Enable incremental chunked streaming for stream-mode keys/index/mapred/buckets responses. |
 | `mapred_backend_enabled` | `boolean()` | `true` | Operator toggle for mapreduce execution (`false` returns `503 service_unavailable`). |

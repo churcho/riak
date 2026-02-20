@@ -9,10 +9,13 @@
     reply_error_map/2,
     error_payload/4,
     compat_headers/1,
+    cors_headers/2,
     telemetry_tags/3,
     %% S2 (CG-001): Incremental streaming helpers
     stream_reply_init/4,
-    stream_reply_body/3
+    stream_reply_body/3,
+    %% S5 (M-2): Shared conversion helper
+    to_binary/1
 ]).
 
 -define(JSON_CONTENT_TYPE, <<"application/json; charset=utf-8">>).
@@ -102,7 +105,47 @@ compat_headers(Opts) ->
     Headers2 = maybe_put(<<"etag">>, maps:get(etag, Opts, undefined), Headers1),
     Headers3 = maybe_put(<<"last-modified">>, maps:get(last_modified, Opts, undefined), Headers2),
     Headers4 = maybe_put(<<"link">>, maps:get(link, Opts, undefined), Headers3),
-    maybe_put_allow(maps:get(allow, Opts, undefined), Headers4).
+    Headers5 = maybe_put_allow(maps:get(allow, Opts, undefined), Headers4),
+    maps:merge(Headers5, cors_headers(Opts, Headers5)).
+
+%% @doc Build CORS response headers based on origin policy.
+%%
+%% S5 (M-4): When trusted_origins is configured and the request
+%% Origin matches, emit Access-Control-Allow-Origin plus standard
+%% CORS headers. When origin policy is not configured (empty list),
+%% no CORS headers are emitted — the existing security model is
+%% preserved unchanged.
+-spec cors_headers(map(), map()) -> map().
+cors_headers(Opts, _BaseHeaders) ->
+    TrustedOrigins = maps:get(trusted_origins, Opts, []),
+    RequestOrigin = maps:get(request_origin, Opts, undefined),
+    case {TrustedOrigins, RequestOrigin} of
+        {[], _} ->
+            #{};
+        {_, undefined} ->
+            #{};
+        {Origins, Origin} when is_list(Origins), is_binary(Origin) ->
+            case lists:member(Origin, Origins) of
+                true ->
+                    #{
+                        <<"access-control-allow-origin">> => Origin,
+                        <<"access-control-allow-methods">> =>
+                            <<"GET, HEAD, PUT, POST, DELETE, OPTIONS">>,
+                        <<"access-control-allow-headers">> =>
+                            <<"Content-Type, X-Request-Id, X-Riak-Vclock, "
+                              "X-Riak-ClientId, If-Match, If-None-Match, "
+                              "If-Unmodified-Since, If-Modified-Since, Origin">>,
+                        <<"access-control-expose-headers">> =>
+                            <<"X-Request-Id, X-Riak-Vclock, ETag, "
+                              "Last-Modified, Link, Location">>,
+                        <<"access-control-max-age">> => <<"3600">>
+                    };
+                false ->
+                    #{}
+            end;
+        _ ->
+            #{}
+    end.
 
 -spec telemetry_tags(map(), non_neg_integer(), non_neg_integer()) -> map().
 telemetry_tags(Context, Status, DurationUs) ->
@@ -166,6 +209,11 @@ maybe_put_opt(Key, Source, Target) ->
 format_reason(Bin) when is_binary(Bin) -> Bin;
 format_reason(Term) -> iolist_to_binary(io_lib:format("~p", [Term])).
 
+%% @doc Convert any Erlang term to a binary safe for JSON/HTTP headers.
+%%
+%% S5 (M-2): Exported as the single canonical conversion helper.
+%% Previously duplicated in riak_admin_api_request and this module.
+-spec to_binary(term()) -> binary().
 to_binary(Value) when is_binary(Value) -> Value;
 to_binary(Value) when is_atom(Value) -> atom_to_binary(Value, utf8);
 to_binary(Value) when is_integer(Value) -> integer_to_binary(Value);

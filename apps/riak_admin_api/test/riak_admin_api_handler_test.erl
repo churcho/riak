@@ -309,6 +309,152 @@ handler_stream_dispatch_sends_chunked_response_test() ->
     end.
 
 %%% ============================================================
+%%% S5 (M-4): CORS response headers
+%%% ============================================================
+
+cors_headers_emitted_when_origin_matches_test() ->
+    StreamID = {cors_match_test, make_ref()},
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{
+            <<"x-request-id">> => <<"rid-cors">>,
+            <<"origin">> => <<"https://admin.example.com">>
+        },
+        pid => self(),
+        streamid => StreamID
+    },
+    RouteOpts = #{
+        cutover_default_mode => enabled,
+        trusted_origins => [<<"https://admin.example.com">>],
+        object_backend => fun(get, _Ctx, _Input) ->
+            {ok, #{status => 200, body => <<"{}">>}}
+        end
+    },
+    {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
+    {200, Headers, _Body} = receive_response_for_stream(StreamID),
+    ?assertEqual(<<"https://admin.example.com">>,
+        maps:get(<<"access-control-allow-origin">>, Headers, undefined)),
+    ?assertNotEqual(undefined,
+        maps:get(<<"access-control-allow-methods">>, Headers, undefined)).
+
+cors_headers_not_emitted_when_no_trusted_origins_test() ->
+    StreamID = {cors_no_origins_test, make_ref()},
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{
+            <<"x-request-id">> => <<"rid-cors-none">>,
+            <<"origin">> => <<"https://evil.example.com">>
+        },
+        pid => self(),
+        streamid => StreamID
+    },
+    RouteOpts = #{
+        cutover_default_mode => enabled,
+        object_backend => fun(get, _Ctx, _Input) ->
+            {ok, #{status => 200, body => <<"{}">>}}
+        end
+    },
+    {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
+    {200, Headers, _Body} = receive_response_for_stream(StreamID),
+    ?assertEqual(undefined,
+        maps:get(<<"access-control-allow-origin">>, Headers, undefined)).
+
+cors_headers_not_emitted_when_origin_mismatch_test() ->
+    StreamID = {cors_mismatch_test, make_ref()},
+    Req0 = #{
+        method => <<"GET">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{
+            <<"x-request-id">> => <<"rid-cors-mismatch">>,
+            <<"origin">> => <<"https://evil.example.com">>
+        },
+        pid => self(),
+        streamid => StreamID
+    },
+    RouteOpts = #{
+        cutover_default_mode => enabled,
+        trusted_origins => [<<"https://admin.example.com">>],
+        object_backend => fun(get, _Ctx, _Input) ->
+            {ok, #{status => 200, body => <<"{}">>}}
+        end
+    },
+    %% For GET (safe method), origin check passes even if mismatch.
+    %% But CORS headers should not be emitted for non-matching origin.
+    {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
+    {200, Headers, _Body} = receive_response_for_stream(StreamID),
+    ?assertEqual(undefined,
+        maps:get(<<"access-control-allow-origin">>, Headers, undefined)).
+
+%%% ============================================================
+%%% S5 (M-6): Body-size enforcement consistency
+%%% ============================================================
+
+body_size_limit_enforced_on_preread_body_test() ->
+    %% When body is pre-populated in the request map, the size limit
+    %% should still be enforced (S5 fix for the #{body := Body} bypass).
+    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
+    application:set_env(riak_admin_api, max_request_body_bytes, 100),
+    try
+        StreamID = {body_preread_size_test, make_ref()},
+        LargeBody = binary:copy(<<"X">>, 200),
+        Req0 = #{
+            method => <<"PUT">>,
+            path => <<"/buckets/users/keys/alice">>,
+            headers => #{<<"x-request-id">> => <<"rid-preread-size">>},
+            body => LargeBody,
+            pid => self(),
+            streamid => StreamID
+        },
+        Opts = #{
+            cutover_default_mode => enabled,
+            object_backend => fun(put, _Ctx, _Input) ->
+                {ok, #{status => 204, body => <<>>}}
+            end
+        },
+        {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
+        {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
+        ?assertEqual(413, Status)
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
+            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
+        end
+    end.
+
+body_size_limit_allows_preread_body_within_limit_test() ->
+    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
+    application:set_env(riak_admin_api, max_request_body_bytes, 1000),
+    try
+        StreamID = {body_preread_ok_test, make_ref()},
+        SmallBody = <<"{\"key\":\"value\"}">>,
+        Req0 = #{
+            method => <<"PUT">>,
+            path => <<"/buckets/users/keys/alice">>,
+            headers => #{<<"x-request-id">> => <<"rid-preread-ok">>},
+            body => SmallBody,
+            pid => self(),
+            streamid => StreamID
+        },
+        Opts = #{
+            cutover_default_mode => enabled,
+            object_backend => fun(put, _Ctx, Input) ->
+                ?assertEqual(SmallBody, maps:get(body, Input)),
+                {ok, #{status => 204, body => <<>>}}
+            end
+        },
+        {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
+        {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
+        ?assertEqual(204, Status)
+    after
+        case OldVal of
+            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
+            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
+        end
+    end.
+
+%%% ============================================================
 %%% Helpers
 %%% ============================================================
 

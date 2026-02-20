@@ -1,7 +1,7 @@
-# Cowboy Critical Remediation Notes (D01 + S0 + S1 + S2)
+# Cowboy Critical Remediation Notes (D01 + S0 + S1 + S2 + S5)
 
 Date: 2026-02-20
-Status: D01 + S0 + S1 + S2 pass notes
+Status: D01 + S0 + S1 + S2 + S5 pass notes
 
 ## Remediations Implemented in D01
 
@@ -409,3 +409,78 @@ Status: **Closed (S1)** — listener under supervisor via `ranch:child_spec/5`.
 ### SD-004: Timeout contract unification (CG-018)
 
 Status: **Closed (S1)** — see D-003 / S1-004.
+
+## Remediations Implemented in S5
+
+### S5-001: CORS response headers (M-4)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_response.erl`
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+
+What changed:
+
+- Added `cors_headers/2` that emits Access-Control-Allow-Origin and related headers when trusted_origins matches the request Origin.
+- `compat_headers/1` merges CORS headers into every response.
+- Handler threads `request_origin` and `trusted_origins` into response opts.
+
+Why safe:
+
+- Default (empty trusted_origins) emits no CORS headers. Strictly additive.
+
+### S5-002: Stream error framing consistency (M-7)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_riak.erl`
+
+What changed:
+
+- Introduced `encode_stream_error/1` as the single stream error JSON encoder.
+- Bucket/key/index/mapred stream error paths all delegate to it.
+- MapReduce stream errors changed from jsx to mochijson2 for consistency.
+
+Why safe:
+
+- Bucket/key/index output is byte-identical. MapReduce stream error shape simplified (minor wire-format change within multipart body).
+
+### S5-003: Body-size enforcement consistency (M-6)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_handler.erl`
+
+What changed:
+
+- `read_request_body/1` now checks `max_request_body_bytes` on the `#{body := Body}` fast path.
+
+Why safe:
+
+- Bodies within the limit are unaffected. Only oversized pre-populated bodies now correctly trigger 413.
+
+### S5-004: Conversion helper consolidation (M-2)
+
+Scope:
+
+- `apps/riak_admin_api/src/riak_admin_api_response.erl`
+- `apps/riak_admin_api/src/riak_admin_api_request.erl`
+
+What changed:
+
+- `to_binary/1` exported from response module as canonical version.
+- Request module's `to_binary/1` delegates to response module.
+- Gateway's `to_bin/1` documented as local alias of the canonical version.
+
+Why safe:
+
+- All three implementations were functionally identical. No behavioral change.
+
+### S5-005: JSON library consistency plan (M-1)
+
+Documentation only. Approved encode/decode paths documented per context. Full migration deferred with rationale.
+
+### S5-006: L-level cleanup (L-1)
+
+- `encode_index_error` consolidated from 3 clauses to 2 via delegation to `encode_stream_error/1`.
+- Documentation comments added to `to_bin/1` in gateway module.

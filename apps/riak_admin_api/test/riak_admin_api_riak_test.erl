@@ -481,3 +481,24 @@ crdt_collection_redirect_default_with_key_no_redirect_test() ->
     Context = #{bucket_type => <<"default">>, bucket => <<"scores">>, key => <<"k1">>},
     ?assertEqual(no_redirect,
                  riak_admin_api_riak:maybe_crdt_collection_redirect(Context)).
+
+%%% ============================================================
+%%% S5 (M-7): encode_stream_error/1 consistency
+%%% ============================================================
+
+encode_stream_error_atom_test() ->
+    Result = iolist_to_binary(riak_admin_api_riak:encode_stream_error(timeout)),
+    Decoded = mochijson2:decode(Result),
+    ?assertEqual({struct, [{<<"error">>, <<"timeout">>}]}, Decoded).
+
+encode_stream_error_binary_test() ->
+    Result = iolist_to_binary(riak_admin_api_riak:encode_stream_error(<<"custom_err">>)),
+    Decoded = mochijson2:decode(Result),
+    ?assertEqual({struct, [{<<"error">>, <<"custom_err">>}]}, Decoded).
+
+encode_stream_error_tuple_test() ->
+    Result = iolist_to_binary(riak_admin_api_riak:encode_stream_error({badarg, oops})),
+    Decoded = mochijson2:decode(Result),
+    {struct, [{<<"error">>, ErrorBin}]} = Decoded,
+    ?assert(is_binary(ErrorBin)),
+    ?assert(byte_size(ErrorBin) > 0).

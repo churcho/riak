@@ -1,4 +1,4 @@
-# Cowboy Critical Gaps Register (D01 + S0 + S1 + S2)
+# Cowboy Critical Gaps Register (D01 + S0 + S1 + S2 + S5)
 
 Date: 2026-02-20
 Status: Active
@@ -53,6 +53,17 @@ Status: Active
 - `CG-017` (`P1`): Cowboy listener moved under supervisor with protocol limits (S1).
 - `CG-018` (`P1`): mapred timeout unified to 503 (S1).
 
+## Medium/Low Quality Items (S5)
+
+| Item ID | Severity | Item | Status | Evidence |
+|---|---|---|---|---|
+| M-4 | Medium | No CORS response headers emitted despite origin validation | Closed (S5) | `cors_headers/2` emits CORS headers when origin matches trusted_origins; 8 tests |
+| M-7 | Medium | Stream error framing inconsistent across bucket/key/index/mapred | Closed (S5) | Unified `encode_stream_error/1` used by all stream paths; 3 tests |
+| M-6 | Medium | Body-size limit bypassed via #{body := Body} fast path | Closed (S5) | `read_request_body/1` enforces limit on pre-populated bodies; 2 tests |
+| M-2 | Medium | `to_bin`/`to_binary` duplicated across 3 modules | Closed (S5) | `riak_admin_api_response:to_binary/1` exported as canonical; request module delegates; gateway documents relationship; 5 tests |
+| M-1 | Medium | JSON library (mochijson2 vs jsx) usage undocumented | Closed (S5) | Documented approved encode/decode paths per context; migration deferred with rationale |
+| L-1 | Low | Minor boilerplate in stream error encoding | Closed (S5) | `encode_index_error` consolidated to delegate through `encode_stream_error/1` |
+
 ## Deferred-Now Summary
 
-All 18 gaps closed. No remaining deferred items.
+All 18 critical gaps closed. 6 medium/low quality items closed in S5. No remaining deferred items.

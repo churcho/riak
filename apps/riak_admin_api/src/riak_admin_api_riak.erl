@@ -89,6 +89,8 @@
     crdt_decode_update_body/2,
     crdt_response_body/4,
     accept_doc_value/2,
+    %% S5 test exports
+    encode_stream_error/1,
     %% S1 test exports
     parallel_ping_nodes/2,
     mapred_timeout_error_map/0,
@@ -1185,7 +1187,21 @@ encode_bucket_list(Buckets) ->
     mochijson2:encode({struct, [{?JSON_BUCKETS, Buckets}]}).
 
 encode_bucket_stream_timeout() ->
-    mochijson2:encode({struct, [{error, timeout}]}).
+    encode_stream_error(timeout).
+
+%% @private Unified stream error JSON encoder.
+%%
+%% S5 (M-7): All stream error paths (bucket, key, index, mapred) now
+%% use this single function for consistent framing. Previously bucket/key
+%% streams used mochijson2 directly, index errors used a separate encoder,
+%% and mapred streams used jsx. This unifies them all on mochijson2
+%% (matching the dominant pattern) with consistent {error, Reason} shape.
+-spec encode_stream_error(term()) -> iodata().
+encode_stream_error(Reason) when is_atom(Reason); is_binary(Reason) ->
+    mochijson2:encode({struct, [{error, Reason}]});
+encode_stream_error(Reason) ->
+    mochijson2:encode({struct, [{error,
+        iolist_to_binary(io_lib:format("~p", [Reason]))}]}).
 
 key_list_operation(Context, Client) ->
     Query = maps:get(query, Context, #{}),
@@ -1356,10 +1372,10 @@ encode_key_list(Keys) ->
     mochijson2:encode({struct, [{?JSON_KEYS, Keys}]}).
 
 encode_key_stream_timeout() ->
-    mochijson2:encode({struct, [{error, timeout}]}).
+    encode_stream_error(timeout).
 
 encode_key_stream_error(Reason) ->
-    mochijson2:encode({struct, [{error, Reason}]}).
+    encode_stream_error(Reason).
 
 %% @doc Maximum time (ms) a stream collection loop may block the handler.
 %%
@@ -1991,11 +2007,8 @@ index_stream_error(Boundary, Error) ->
 
 encode_index_error({error, E}) ->
     encode_index_error(E);
-encode_index_error(Error) when is_atom(Error); is_binary(Error) ->
-    mochijson2:encode({struct, [{error, Error}]});
 encode_index_error(Error) ->
-    Value = iolist_to_binary(io_lib:format("~p", [Error])),
-    mochijson2:encode({struct, [{error, Value}]}).
+    encode_stream_error(Error).
 
 whack_index_fsm(ReqId, Pid) when is_pid(Pid) ->
     wait_for_death(Pid),
@@ -2529,14 +2542,14 @@ mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit) ->
             end;
         {error, timeout, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
-            ErrorJson = jsx:encode(#{error => <<"timeout">>,
-                                     reason => <<"mapreduce timed out">>}),
+            %% S5 (M-7): Use mochijson2 for stream error framing
+            %% consistency with bucket/key/index stream errors.
+            ErrorJson = encode_stream_error(timeout),
             Emit(mapred_error_part(ErrorJson, Boundary), fin);
         {error, {Died, Error}, _} when Died =:= sender_died;
                                         Died =:= sink_died ->
             riak_kv_mrc_pipe:cleanup_sink(Mrc),
-            ErrorJson = jsx:encode(#{error => <<"backend_error">>,
-                                     reason => to_bin(Error)}),
+            ErrorJson = encode_stream_error(Error),
             Emit(mapred_error_part(ErrorJson, Boundary), fin);
         {error, {From, Info}, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
@@ -2905,6 +2918,10 @@ round_pct(Count, Total) ->
 %% @private Convert any Erlang term to a binary safe for jsx.
 %% Riak internals often return charlists (e.g., cluster_name)
 %% which jsx cannot encode. This helper normalises them.
+%%
+%% S5 (M-2): Functionally identical to riak_admin_api_response:to_binary/1.
+%% Kept as a local alias (60+ call sites) to avoid a high-churn rename.
+%% The canonical shared version lives in the response module.
 -spec to_bin(term()) -> binary().
 to_bin(V) when is_binary(V) -> V;
 to_bin(V) when is_atom(V) -> atom_to_binary(V, utf8);

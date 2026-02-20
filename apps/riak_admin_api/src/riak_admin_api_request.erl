@@ -935,8 +935,5 @@ with_request_id(Error0, RequestId) ->
     end,
     Error#{request_id => RequestId}.
 
-to_binary(Value) when is_binary(Value) -> Value;
-to_binary(Value) when is_atom(Value) -> atom_to_binary(Value, utf8);
-to_binary(Value) when is_integer(Value) -> integer_to_binary(Value);
-to_binary(Value) when is_list(Value) -> list_to_binary(Value);
-to_binary(Value) -> iolist_to_binary(io_lib:format("~p", [Value])).
+%% S5 (M-2): Delegate to shared to_binary/1 in response module.
+to_binary(Value) -> riak_admin_api_response:to_binary(Value).

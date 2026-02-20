@@ -31,12 +31,14 @@ This file is the cross-branch handoff ledger for new context windows/agents.
 | S0 | `feature/cowboy-s0-security-hardening` | 5ff1e72e | see_report_back_output | N/A (report-back) | Done | S0 security hardening: safe binary_to_term, TLS proxy trust gate, body size limits, substrate disabled by default, origin hardening for unsafe methods, compile-time isolation docs correction. 6 critical/high gaps closed (CG-009–CG-014), 4 new deferred (CG-015–CG-018). |
 | S1 | `feature/cowboy-s1-resilience-perf` | f2ea468a | see_report_back_output | N/A (report-back) | Done | S1 resilience hardening: listener supervision + protocol limits, parallel pings, stream collection ceiling, mapred timeout 503 unification, list_keys error mode toggle, auth guardrails. 5 gaps closed (CG-005, CG-015–CG-018). |
 | S2 | `feature/cowboy-s2-streaming-conditions-parity` | 26b17f1f | see_report_back_output | N/A (report-back) | Done | S2 deferred gap closure: true incremental streaming (CG-001), conditional-write enforcement (CG-004), MapReduce backend toggle (CG-006), CRDT collection redirect parity (CG-007), /riak counters alias explicit rejection (CG-008). All 18 gaps closed. |
+| S5 | `feature/cowboy-s5-quality-consistency` | c96fd528 | see_report_back_output | N/A (report-back) | Done | S5 quality/consistency pass: CORS response headers (M-4), stream error framing unification (M-7), body-size enforcement consistency (M-6), to_binary consolidation (M-2), JSON library path documentation (M-1), minor cleanup (L-1). 6 medium/low items closed. |
 
 Reference docs:
 - `docs/plans/2026-02-19-cowboy-interface-d01-multidc-distribution-followup.md`
 - `docs/plans/artifacts/s0-security-hardening-notes.md`
 - `docs/plans/artifacts/s1-resilience-hardening-notes.md`
 - `docs/plans/artifacts/s2-deferred-gap-closure-notes.md`
+- `docs/plans/artifacts/s5-quality-consistency-notes.md`
 
 ## Agent startup checklist
 
