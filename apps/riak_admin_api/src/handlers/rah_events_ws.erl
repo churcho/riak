@@ -111,7 +111,8 @@ dispatch_action(#{<<"action">> := <<"subscribe">>,
     State1 = State#{subscriptions := NewSubs},
     AckFrame = jsx:encode(#{type => <<"subscribed">>,
                             topics => Requested}),
-    {[{text, AckFrame}], State1};
+    SnapshotFrames = snapshot_frames(Requested),
+    {[{text, AckFrame} | SnapshotFrames], State1};
 
 dispatch_action(#{<<"action">> := <<"unsubscribe">>,
                   <<"topics">> := Topics}, State)
@@ -142,6 +143,27 @@ dispatch_action(_, State) ->
 %%% ============================================================
 %%% Internal helpers
 %%% ============================================================
+
+snapshot_frames(Topics) ->
+    lists:filtermap(
+        fun(Topic) ->
+            try riak_admin_api_event_bridge:get_snapshot(Topic) of
+                {ok, Data} ->
+                    Frame = jsx:encode(#{
+                        type => <<"snapshot">>,
+                        topic => Topic,
+                        node => node(),
+                        data => Data,
+                        timestamp => erlang:system_time(second)
+                    }),
+                    {true, {text, Frame}};
+                {error, _} ->
+                    false
+            catch
+                exit:{noproc, _} -> false;
+                _:_ -> false
+            end
+        end, Topics).
 
 join_events_group() ->
     try
