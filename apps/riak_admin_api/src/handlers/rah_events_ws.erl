@@ -79,13 +79,19 @@ websocket_handle(_Other, State) ->
     {ok, State}.
 
 %% @doc Handle Erlang messages (syn events, etc).
+%%
+%% Only accepts events from the local node's bridge. On a multi-node
+%% cluster, each node runs its own bridge, and syn distributes events
+%% across all nodes. Without this filter, a WS handler would receive
+%% N copies of every event (one from each node's bridge).
+%%
 %% Includes backpressure: if the message queue exceeds the configured
 %% limit, the event is dropped and a warning frame is sent instead.
 -spec websocket_info(term(), map()) ->
     {[{text, binary()}], map()} | {ok, map()}.
 websocket_info({event, Node, {Topic, Data}},
                #{subscriptions := Subs} = State) ->
-    case lists:member(Topic, Subs) of
+    case Node =:= node() andalso lists:member(Topic, Subs) of
         true ->
             case check_backpressure() of
                 ok ->
@@ -132,7 +138,11 @@ dispatch_action(#{<<"action">> := <<"subscribe">>,
     State1 = State#{subscriptions := NewSubs},
     AckFrame = jsx:encode(#{type => <<"subscribed">>,
                             topics => Requested}),
-    SnapshotFrames = snapshot_frames(Requested),
+    %% Only send snapshots for topics that are genuinely new.
+    %% Re-subscribing to an already-active topic is idempotent
+    %% but should not trigger a redundant snapshot delivery.
+    NewTopics = Requested -- Current,
+    SnapshotFrames = snapshot_frames(NewTopics),
     {[{text, AckFrame} | SnapshotFrames], State1};
 
 dispatch_action(#{<<"action">> := <<"unsubscribe">>,
@@ -231,7 +241,13 @@ check_backpressure() ->
 
 join_events_group() ->
     try
-        syn:join(?SCOPE, ?GROUP_EVENTS, self())
+        case syn:join(?SCOPE, ?GROUP_EVENTS, self()) of
+            ok ->
+                ok;
+            {error, JoinErr} ->
+                logger:warning("[riak_admin] WS handler failed to join "
+                               "cluster_events: ~p", [JoinErr])
+        end
     catch
         _:Err ->
             logger:warning("[riak_admin] WS handler could not join "
@@ -307,6 +323,23 @@ dispatch_subscribe_test_() ->
                      <<"topics">> => [<<"ring">>, <<"bogus">>]},
              {_Frames, State1} = dispatch_action(Msg, State),
              ?assertEqual([<<"ring">>], maps:get(subscriptions, State1))
+         end},
+        {"re-subscribing to already subscribed topic is idempotent",
+         fun() ->
+             State = #{subscriptions => [<<"ring">>]},
+             Msg = #{<<"action">> => <<"subscribe">>,
+                     <<"topics">> => [<<"ring">>, <<"cluster">>]},
+             {Frames, State1} = dispatch_action(Msg, State),
+             %% Both topics should be in the subscription list
+             ?assertEqual([<<"cluster">>, <<"ring">>],
+                          maps:get(subscriptions, State1)),
+             %% Ack frame should list both requested topics
+             {text, AckJson} = hd(Frames),
+             AckDecoded = jsx:decode(AckJson, [return_maps]),
+             ?assertEqual(<<"subscribed">>, maps:get(<<"type">>, AckDecoded)),
+             AckTopics = maps:get(<<"topics">>, AckDecoded),
+             ?assert(lists:member(<<"ring">>, AckTopics)),
+             ?assert(lists:member(<<"cluster">>, AckTopics))
          end}
     ]}.
 
@@ -349,8 +382,8 @@ dispatch_unknown_action_test_() ->
      end}.
 
 websocket_info_filters_by_subscription_test_() ->
-    {"websocket_info only sends subscribed topics", [
-        {"subscribed topic generates frame",
+    {"websocket_info only sends subscribed local-node topics", [
+        {"subscribed topic from local node generates frame",
          fun() ->
              State = #{subscriptions => [<<"ring">>]},
              Event = {event, node(), {<<"ring">>, #{test => true}}},
@@ -361,6 +394,14 @@ websocket_info_filters_by_subscription_test_() ->
          fun() ->
              State = #{subscriptions => [<<"ring">>]},
              Event = {event, node(), {<<"cluster">>, #{test => true}}},
+             Result = websocket_info(Event, State),
+             ?assertEqual({ok, State}, Result)
+         end},
+        {"subscribed topic from remote node is dropped (prevents multi-node duplicates)",
+         fun() ->
+             State = #{subscriptions => [<<"ring">>]},
+             RemoteNode = 'remote@other.host',
+             Event = {event, RemoteNode, {<<"ring">>, #{test => true}}},
              Result = websocket_info(Event, State),
              ?assertEqual({ok, State}, Result)
          end}

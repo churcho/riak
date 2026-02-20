@@ -70,7 +70,8 @@ init([]) ->
 
     State = #{
         snapshots => #{},
-        last_services => undefined
+        last_services => undefined,
+        stats_collecting => false
     },
     logger:info("[riak_admin] Event bridge started"),
     {ok, State}.
@@ -100,9 +101,15 @@ handle_cast(_Msg, State) ->
 
 -spec handle_info(term(), map()) -> {noreply, map()}.
 handle_info(poll_node_stats, State) ->
-    State1 = handle_poll_node_stats(State),
+    State1 = maybe_start_stats_collection(State),
     schedule_poll(poll_node_stats, bridge_stats_interval()),
     {noreply, State1};
+handle_info({stats_collected, {ok, StatsData}}, State) ->
+    State1 = State#{stats_collecting := false},
+    State2 = maybe_publish_changed(<<"node_stats">>, StatsData, State1),
+    {noreply, State2};
+handle_info({stats_collected, {error, _}}, State) ->
+    {noreply, State#{stats_collecting := false}};
 handle_info(poll_handoff, State) ->
     State1 = handle_poll_handoff(State),
     schedule_poll(poll_handoff, bridge_handoff_interval()),
@@ -150,13 +157,20 @@ handle_service_update(Services, #{last_services := LastServices} = State) ->
 %%% Poll-based event handling (stubs for Step 5)
 %%% ============================================================
 
-handle_poll_node_stats(State) ->
-    case collect_all_node_stats() of
-        {ok, StatsData} ->
-            maybe_publish_changed(<<"node_stats">>, StatsData, State);
-        {error, _} ->
-            State
-    end.
+%% @private Start stats collection in a separate process to avoid
+%% blocking the gen_server. Each node_stats call may RPC to a remote
+%% node with a 5s timeout — doing N calls sequentially in the
+%% gen_server would block snapshot reads and event processing.
+%% Skips if a collection is already in flight.
+maybe_start_stats_collection(#{stats_collecting := true} = State) ->
+    State;
+maybe_start_stats_collection(State) ->
+    Bridge = self(),
+    spawn_link(fun() ->
+        Result = collect_all_node_stats(),
+        Bridge ! {stats_collected, Result}
+    end),
+    State#{stats_collecting := true}.
 
 handle_poll_handoff(State) ->
     case riak_admin_api_riak:handoff_status() of
@@ -216,6 +230,11 @@ extract_cluster_data(Ring) ->
                 maps:update_with(Node, fun(C) -> C + 1 end, 1, Acc)
             end, #{}, Owners),
 
+        %% Use the connected node list for a cheap reachability check.
+        %% This avoids expensive parallel pings inside a ring callback.
+        %% The local node is always reachable; remote nodes are checked
+        %% via erlang:nodes() (already connected via distribution).
+        ConnectedNodes = [node() | erlang:nodes()],
         Nodes = lists:map(
             fun(Node) ->
                 Status = proplists:get_value(Node, MemberStatus, unknown),
@@ -224,8 +243,9 @@ extract_cluster_data(Ring) ->
                     0 -> 0.0;
                     _ -> float(round(Count * 10000 / NumPartitions)) / 100
                 end,
+                Reachable = lists:member(Node, ConnectedNodes),
                 #{name => Node, status => Status,
-                  ring_pct => Pct, reachable => true}
+                  ring_pct => Pct, reachable => Reachable}
             end, Members),
 
         #{
@@ -300,12 +320,18 @@ maybe_publish_changed(Topic, Data, #{snapshots := Snaps} = State) ->
 
 publish_event(Topic, Data) ->
     try
-        syn:publish(?SCOPE, ?GROUP_EVENTS,
-                    {event, node(), {Topic, Data}})
+        case syn:publish(?SCOPE, ?GROUP_EVENTS,
+                         {event, node(), {Topic, Data}}) of
+            {ok, _RecipientCount} ->
+                ok;
+            {error, Reason} ->
+                logger:warning("[riak_admin] Bridge publish ~s rejected: ~p",
+                               [Topic, Reason])
+        end
     catch
-        _:PublishErr ->
+        _:CrashErr ->
             logger:warning("[riak_admin] Bridge failed to publish ~s: ~p",
-                           [Topic, PublishErr])
+                           [Topic, CrashErr])
     end.
 
 %%% ============================================================
@@ -314,10 +340,20 @@ publish_event(Topic, Data) ->
 
 subscribe_ring_events() ->
     try
-        riak_core_ring_events:add_sup_callback(fun(Ring) ->
+        case riak_core_ring_events:add_sup_callback(fun(Ring) ->
             gen_server:cast(?MODULE, {ring_update, Ring})
-        end),
-        ok
+        end) of
+            ok ->
+                ok;
+            {'EXIT', Reason} ->
+                logger:warning("[riak_admin] ring_events subscription "
+                               "handler init failed: ~p", [Reason]),
+                ok;
+            Other ->
+                logger:warning("[riak_admin] ring_events subscription "
+                               "unexpected return: ~p", [Other]),
+                ok
+        end
     catch
         _:Err ->
             logger:warning("[riak_admin] Could not subscribe to "
@@ -327,10 +363,20 @@ subscribe_ring_events() ->
 
 subscribe_node_watcher_events() ->
     try
-        riak_core_node_watcher_events:add_sup_callback(fun(Services) ->
+        case riak_core_node_watcher_events:add_sup_callback(fun(Services) ->
             gen_server:cast(?MODULE, {service_update, Services})
-        end),
-        ok
+        end) of
+            ok ->
+                ok;
+            {'EXIT', Reason} ->
+                logger:warning("[riak_admin] node_watcher_events subscription "
+                               "handler init failed: ~p", [Reason]),
+                ok;
+            Other ->
+                logger:warning("[riak_admin] node_watcher_events subscription "
+                               "unexpected return: ~p", [Other]),
+                ok
+        end
     catch
         _:Err ->
             logger:warning("[riak_admin] Could not subscribe to "
@@ -517,6 +563,31 @@ schedule_poll_test_() ->
              test_poll_msg -> ok
          after 100 ->
              ?assert(false)
+         end
+     end}.
+
+maybe_start_stats_collection_skips_when_active_test_() ->
+    {"stats collection skips when already in flight",
+     fun() ->
+         State = #{stats_collecting => true, snapshots => #{}},
+         State1 = maybe_start_stats_collection(State),
+         %% State unchanged — no new spawn
+         ?assertEqual(true, maps:get(stats_collecting, State1))
+     end}.
+
+maybe_start_stats_collection_sets_flag_test_() ->
+    {"stats collection sets collecting flag and spawns worker",
+     fun() ->
+         State = #{stats_collecting => false, snapshots => #{}},
+         State1 = maybe_start_stats_collection(State),
+         ?assertEqual(true, maps:get(stats_collecting, State1)),
+         %% The spawned process will try collect_all_node_stats which
+         %% will fail (no riak_core), send us {stats_collected, {error, _}},
+         %% and exit. Drain the message so it doesn't leak into other tests.
+         receive
+             {stats_collected, _} -> ok
+         after 2000 ->
+             ok
          end
      end}.
 
