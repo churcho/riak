@@ -163,8 +163,8 @@ ensure_auth_guardrails(Opts) ->
         application:get_env(riak_admin_api, security_require_auth, false)),
     case RequireAuth of
         true ->
-            HasAuthn = maps:is_key(authn_fun, Opts),
-            HasAuthz = maps:is_key(authz_fun, Opts),
+            HasAuthn = has_valid_hook(authn_fun, Opts),
+            HasAuthz = has_valid_hook(authz_fun, Opts),
             case {HasAuthn, HasAuthz} of
                 {false, _} ->
                     logger:error("[riak_admin] security_require_auth is true "
@@ -187,6 +187,16 @@ ensure_auth_guardrails(Opts) ->
             end;
         _ ->
             ok
+    end.
+
+has_valid_hook(Key, Opts) ->
+    case maps:get(Key, Opts, undefined) of
+        undefined -> false;
+        Fun when is_function(Fun, 1) -> true;
+        Fun when is_function(Fun, 2) -> true;
+        {M, F} when is_atom(M), is_atom(F) -> true;
+        {M, F, 2} when is_atom(M), is_atom(F) -> true;
+        _ -> false
     end.
 
 normalize_riak(Method, Tail, Query) ->
@@ -555,8 +565,12 @@ resolve_cutover_mode(Op, Opts) ->
 
 resolve_default_cutover_mode(Mode) ->
     case normalize_cutover_mode(Mode) of
-        invalid -> enabled;
-        Normalized -> Normalized
+        invalid ->
+            logger:error("[riak_admin] invalid cowboy_cutover_default_mode ~p — "
+                         "defaulting to disabled", [Mode]),
+            disabled;
+        Normalized ->
+            Normalized
     end.
 
 lookup_cutover_mode(Op, Modes) when is_map(Modes) ->
@@ -778,11 +792,15 @@ run_security_hook(Key, Context, Opts) ->
             normalize_hook_result(Fun(Context));
         Fun when is_function(Fun, 2) ->
             normalize_hook_result(Fun(Context, Opts));
+        {M, F} when is_atom(M), is_atom(F) ->
+            normalize_hook_result(M:F(Context));
+        {M, F, 2} when is_atom(M), is_atom(F) ->
+            normalize_hook_result(M:F(Context, Opts));
         _ ->
             {error, #{
                 status => 500,
                 code => <<"security_hook_error">>,
-                reason => <<"Security hook must be a function">>
+                reason => <<"Security hook must be a function or {Module, Function} tuple">>
             }}
     end.
 

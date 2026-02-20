@@ -587,7 +587,17 @@ execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
         {stream, StreamInit, ChunkFun} ->
-            reply_stream(Context, Req, StreamInit, ChunkFun, ReplyOpts);
+            case maps:get(method, Context) of
+                <<"HEAD">> ->
+                    reply_object(Context, Req, #{
+                        status => maps:get(status, StreamInit, 200),
+                        body => <<>>,
+                        content_type => maps:get(content_type, StreamInit, undefined),
+                        headers => maps:get(headers, StreamInit, #{})
+                    }, ReplyOpts);
+                _ ->
+                    reply_stream(Context, Req, StreamInit, ChunkFun, ReplyOpts)
+            end;
         {error, Error} when is_map(Error) ->
             riak_admin_api_response:reply_error_map(
                 with_error_context(Error, Context, ReplyOpts),
@@ -910,6 +920,10 @@ request_opts(RouteOpts) ->
         trust_proxy_headers => maps:get(trust_proxy_headers, RouteMap, DefaultTrustProxyHeaders),
         trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins),
         require_auth => maps:get(require_auth, RouteMap, DefaultRequireAuth),
+        authn_fun => maps:get(authn_fun, RouteMap,
+            application:get_env(riak_admin_api, authn_hook, undefined)),
+        authz_fun => maps:get(authz_fun, RouteMap,
+            application:get_env(riak_admin_api, authz_hook, undefined)),
         cutover_default_mode => maps:get(
             cutover_default_mode,
             RouteMap,

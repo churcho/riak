@@ -523,8 +523,15 @@ check_write_preconditions(Context, CondOpts, Client) ->
                                 reason => <<"If-Match failed: object does not exist">>
                             }}
                     end;
-                {error, _Reason} ->
-                    ok
+                {error, Reason} ->
+                    logger:warning("[riak_admin] precondition read failed for ~p/~p: ~p — "
+                                   "failing closed (503)",
+                                   [BucketRef, Key, Reason]),
+                    {error, #{
+                        status => 503,
+                        code => <<"precondition_read_failed">>,
+                        reason => <<"Cannot verify write preconditions: read unavailable">>
+                    }}
             end
     end.
 
@@ -2522,21 +2529,17 @@ mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit) ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             ErrorJson = jsx:encode(#{error => <<"timeout">>,
                                      reason => <<"mapreduce timed out">>}),
-            Emit(ErrorJson, fin);
-        {error, {sender_died, Error}, _} ->
+            Emit(mapred_error_part(ErrorJson, Boundary), fin);
+        {error, {Died, Error}, _} when Died =:= sender_died;
+                                        Died =:= sink_died ->
             riak_kv_mrc_pipe:cleanup_sink(Mrc),
             ErrorJson = jsx:encode(#{error => <<"backend_error">>,
                                      reason => to_bin(Error)}),
-            Emit(ErrorJson, fin);
-        {error, {sink_died, Error}, _} ->
-            riak_kv_mrc_pipe:cleanup_sink(Mrc),
-            ErrorJson = jsx:encode(#{error => <<"backend_error">>,
-                                     reason => to_bin(Error)}),
-            Emit(ErrorJson, fin);
+            Emit(mapred_error_part(ErrorJson, Boundary), fin);
         {error, {From, Info}, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
-            Emit(to_bin(Json), fin)
+            Emit(mapred_error_part(to_bin(Json), Boundary), fin)
     end.
 
 mapred_jsonify_results(Results) ->
@@ -2566,6 +2569,14 @@ mapred_result_part(Other, _HasMRQuery, Boundary) ->
         "Content-Type: application/json\r\n\r\n",
         Json
     ].
+
+mapred_error_part(ErrorJson, Boundary) ->
+    iolist_to_binary([
+        "\r\n--", Boundary, "\r\n",
+        "Content-Type: application/json\r\n\r\n",
+        ErrorJson,
+        "\r\n--", Boundary, "--\r\n"
+    ]).
 
 mapred_parse_error({'query', Reason}) ->
     mapred_invalid_body_error(iolist_to_binary(
