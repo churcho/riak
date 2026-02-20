@@ -236,8 +236,12 @@ bucket_operation(set_bucket_props, Context, Input, Client) ->
             {error, Error}
     end;
 bucket_operation(delete_bucket_props, Context, _Input, Client) ->
-    _ = riak_client:reset_bucket(bucket_props_ref(Context), Client),
-    {ok, json_backend_reply(204, <<>>)};
+    case riak_client:reset_bucket(bucket_props_ref(Context), Client) of
+        ok ->
+            {ok, json_backend_reply(204, <<>>)};
+        {error, Details} ->
+            {error, bucket_error_map({invalid_props, Details})}
+    end;
 bucket_operation(get_bucket_type_props, Context, _Input, _Client) ->
     Type = maps:get(bucket_type, Context, <<"default">>),
     case riak_core_bucket_type:get(Type) of
@@ -884,9 +888,9 @@ build_object_options(_Mode, Query, Base) ->
         {dw, maps:get(<<"dw">>, Query, undefined)},
         {rw, maps:get(<<"rw">>, Query, undefined)},
         {node_confirms, maps:get(<<"node_confirms">>, Query, undefined)},
-        {timeout, maps:get(<<"timeout">>, Query, undefined)},
-        {basic_quorum, maps:get(<<"basic_quorum">>, Query, undefined)},
-        {notfound_ok, maps:get(<<"notfound_ok">>, Query, undefined)}
+        {timeout, parse_query_timeout(maps:get(<<"timeout">>, Query, undefined))},
+        {basic_quorum, normalize_boolean(maps:get(<<"basic_quorum">>, Query, undefined))},
+        {notfound_ok, normalize_boolean(maps:get(<<"notfound_ok">>, Query, undefined))}
     ],
     Options1 = [
         {Key, Value}
@@ -901,6 +905,14 @@ build_object_options(_Mode, Query, Base) ->
         undefined -> Base ++ Options2;
         SyncValue -> Base ++ [{sync_on_write, normalize_sync_on_write(SyncValue)} | Options2]
     end.
+
+parse_query_timeout(undefined) -> undefined;
+parse_query_timeout(Timeout) when is_integer(Timeout) -> Timeout;
+parse_query_timeout(Timeout) when is_binary(Timeout) ->
+    try binary_to_integer(Timeout)
+    catch error:badarg -> undefined
+    end;
+parse_query_timeout(_) -> undefined.
 
 normalize_boolean(true) -> true;
 normalize_boolean(false) -> false;
@@ -1424,6 +1436,12 @@ stream_collection_ceiling() ->
     pos_integer().
 cap_timeout(undefined, Ceiling) -> Ceiling;
 cap_timeout(infinity, Ceiling) -> Ceiling;
+cap_timeout(Timeout, Ceiling) when is_binary(Timeout) ->
+    try binary_to_integer(Timeout) of
+        IntTimeout -> erlang:min(IntTimeout, Ceiling)
+    catch
+        error:badarg -> Ceiling
+    end;
 cap_timeout(Timeout, Ceiling) when is_integer(Timeout) ->
     erlang:min(Timeout, Ceiling).
 

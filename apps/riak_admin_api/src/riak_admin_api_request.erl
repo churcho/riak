@@ -501,8 +501,7 @@ ensure_allowed_method(Method, Context) ->
             {error, #{
                 status => 405,
                 code => <<"method_not_allowed">>,
-                reason => iolist_to_binary(
-                    io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                reason => <<"Unsupported HTTP method: ", Method/binary>>,
                 allow => Allowed
             }}
     end.

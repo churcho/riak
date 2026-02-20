@@ -71,7 +71,8 @@ init([]) ->
     State = #{
         snapshots => #{},
         last_services => undefined,
-        stats_collecting => false
+        stats_collecting => false,
+        stats_gen => 0
     },
     logger:info("[riak_admin] Event bridge started"),
     {ok, State}.
@@ -118,11 +119,12 @@ handle_info(poll_aae, State) ->
     State1 = handle_poll_aae(State),
     schedule_poll(poll_aae, bridge_aae_interval()),
     {noreply, State1};
-handle_info(stats_collection_timeout, #{stats_collecting := true} = State) ->
+handle_info({stats_collection_timeout, Gen},
+            #{stats_collecting := true, stats_gen := Gen} = State) ->
     logger:debug("[riak_admin] Stats collection timed out, resetting flag"),
     {noreply, State#{stats_collecting := false}};
-handle_info(stats_collection_timeout, State) ->
-    %% Already completed, ignore stale timeout
+handle_info({stats_collection_timeout, _}, State) ->
+    %% Stale or already-completed generation, ignore
     {noreply, State};
 handle_info(_Msg, State) ->
     {noreply, State}.
@@ -184,9 +186,13 @@ maybe_start_stats_collection(State) ->
         Result = collect_all_node_stats(),
         Bridge ! {stats_collected, Result}
     end),
-    %% Safety: reset flag if worker dies without sending result
-    erlang:send_after(bridge_stats_interval() * 2, self(), stats_collection_timeout),
-    State#{stats_collecting := true}.
+    %% Safety: reset flag if worker dies without sending result.
+    %% Generation counter ensures stale timeouts from previous
+    %% collection cycles don't reset the flag for the current one.
+    Gen = maps:get(stats_gen, State, 0) + 1,
+    erlang:send_after(bridge_stats_interval() * 2, self(),
+                      {stats_collection_timeout, Gen}),
+    State#{stats_collecting := true, stats_gen => Gen}.
 
 handle_poll_handoff(State) ->
     case riak_admin_api_riak:handoff_status() of

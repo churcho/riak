@@ -188,6 +188,16 @@ dispatch_action(#{<<"action">> := <<"unsubscribe">>,
                         <<"'topics' must be a JSON array of strings">>),
     {[{text, Frame}], State};
 
+dispatch_action(#{<<"action">> := <<"subscribe">>}, State) ->
+    Frame = error_frame(<<"invalid_message">>,
+                        <<"'subscribe' requires a 'topics' field">>),
+    {[{text, Frame}], State};
+
+dispatch_action(#{<<"action">> := <<"unsubscribe">>}, State) ->
+    Frame = error_frame(<<"invalid_message">>,
+                        <<"'unsubscribe' requires a 'topics' field">>),
+    {[{text, Frame}], State};
+
 dispatch_action(#{<<"action">> := Action}, State)
   when is_binary(Action) ->
     Safe = sanitize_for_display(Action),
