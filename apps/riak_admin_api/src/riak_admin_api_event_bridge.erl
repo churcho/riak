@@ -63,6 +63,11 @@ init([]) ->
     ok = subscribe_ring_events(),
     ok = subscribe_node_watcher_events(),
 
+    %% Start poll timers for timer-based data sources.
+    schedule_poll(poll_node_stats, bridge_stats_interval()),
+    schedule_poll(poll_handoff, bridge_handoff_interval()),
+    schedule_poll(poll_aae, bridge_aae_interval()),
+
     State = #{
         snapshots => #{},
         last_services => undefined
@@ -459,6 +464,82 @@ to_bin_test_() ->
          fun() -> ?assertEqual(<<"ok">>, to_bin(ok)) end},
         {"list conversion",
          fun() -> ?assertEqual(<<"abc">>, to_bin("abc")) end}
+    ]}.
+
+maybe_publish_changed_publishes_new_data_test_() ->
+    {"maybe_publish_changed publishes when data is new",
+     fun() ->
+         application:set_env(riak_admin_api, bridge_diff_detection, true),
+         State0 = #{snapshots => #{}},
+         Data = #{foo => bar},
+         State1 = maybe_publish_changed(<<"test">>, Data, State0),
+         ?assertEqual(Data, maps:get(<<"test">>, maps:get(snapshots, State1)))
+     end}.
+
+maybe_publish_changed_publishes_when_diff_disabled_test_() ->
+    {"maybe_publish_changed always publishes when diff detection is off",
+     fun() ->
+         application:set_env(riak_admin_api, bridge_diff_detection, false),
+         Data = #{foo => bar},
+         State0 = #{snapshots => #{<<"test">> => Data}},
+         %% Same data, but diff detection is off, so it should still update
+         State1 = maybe_publish_changed(<<"test">>, Data, State0),
+         %% The snapshot is re-stored (same value, but publish happened)
+         ?assertEqual(Data, maps:get(<<"test">>, maps:get(snapshots, State1))),
+         application:unset_env(riak_admin_api, bridge_diff_detection)
+     end}.
+
+handle_service_update_first_call_test_() ->
+    {"first service update with undefined previous does not publish",
+     fun() ->
+         State0 = #{snapshots => #{}, last_services => undefined},
+         State1 = handle_service_update([riak_kv], State0),
+         ?assertEqual([riak_kv], maps:get(last_services, State1)),
+         %% No events published since diff against undefined is empty
+         ?assertNot(maps:is_key(<<"membership">>, maps:get(snapshots, State1)))
+     end}.
+
+handle_service_update_change_publishes_test_() ->
+    {"service change produces membership event",
+     fun() ->
+         State0 = #{snapshots => #{}, last_services => [riak_kv]},
+         State1 = handle_service_update([riak_kv, riak_pipe], State0),
+         ?assertEqual([riak_kv, riak_pipe], maps:get(last_services, State1)),
+         %% Should have stored membership snapshot
+         ?assert(maps:is_key(<<"membership">>, maps:get(snapshots, State1)))
+     end}.
+
+schedule_poll_test_() ->
+    {"schedule_poll sends a message after interval",
+     fun() ->
+         schedule_poll(test_poll_msg, 1),
+         receive
+             test_poll_msg -> ok
+         after 100 ->
+             ?assert(false)
+         end
+     end}.
+
+bridge_intervals_configurable_test_() ->
+    {"bridge intervals are configurable via application env", [
+        {"stats interval",
+         fun() ->
+             application:set_env(riak_admin_api, bridge_stats_interval, 5000),
+             ?assertEqual(5000, bridge_stats_interval()),
+             application:unset_env(riak_admin_api, bridge_stats_interval)
+         end},
+        {"handoff interval",
+         fun() ->
+             application:set_env(riak_admin_api, bridge_handoff_interval, 20000),
+             ?assertEqual(20000, bridge_handoff_interval()),
+             application:unset_env(riak_admin_api, bridge_handoff_interval)
+         end},
+        {"aae interval",
+         fun() ->
+             application:set_env(riak_admin_api, bridge_aae_interval, 60000),
+             ?assertEqual(60000, bridge_aae_interval()),
+             application:unset_env(riak_admin_api, bridge_aae_interval)
+         end}
     ]}.
 
 -endif.
