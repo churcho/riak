@@ -35,11 +35,8 @@
 %% Logs the discovery for operational visibility.
 -spec on_process_registered(atom(), term(), pid(), term(), term()) -> any().
 on_process_registered(riak_admin, {api_node, Node}, _Pid, Meta, _Reason) ->
-    DC = case is_map(Meta) of
-        true -> maps:get(dc, Meta, <<"unknown">>);
-        false -> <<"unknown">>
-    end,
-    logger:info("[riak_admin] Discovered admin API on ~p (dc=~s)", [Node, DC]),
+    logger:info("[riak_admin] Discovered admin API on ~p (dc=~s)",
+                [Node, safe_dc(Meta)]),
     ok;
 on_process_registered(_Scope, _Key, _Pid, _Meta, _Reason) ->
     ok.
@@ -53,10 +50,7 @@ on_process_registered(_Scope, _Key, _Pid, _Meta, _Reason) ->
 %% Node}. We use term() to match the real-world values.
 -spec on_process_unregistered(atom(), term(), pid(), term(), term()) -> any().
 on_process_unregistered(riak_admin, {api_node, Node}, _Pid, Meta, Reason) ->
-    DC = case is_map(Meta) of
-        true -> maps:get(dc, Meta, <<"unknown">>);
-        false -> <<"unknown">>
-    end,
+    DC = safe_dc(Meta),
     case Reason of
         {syn_remote_scope_node_down, _Scope, _RemoteNode} ->
             logger:warning("[riak_admin] DC ~s node ~p unreachable "
@@ -118,8 +112,15 @@ on_process_left(_Scope, _Group, _Pid, _Meta, _Reason) ->
 %%% Internal
 %%% ============================================================
 
-%% @private Safely extract started_at from metadata.
+%% @private Safely extract dc name from metadata.
 %% Meta is term() per syn's callback spec; may not be a map.
+-spec safe_dc(term()) -> binary().
+safe_dc(Meta) when is_map(Meta) ->
+    maps:get(dc, Meta, <<"unknown">>);
+safe_dc(_) ->
+    <<"unknown">>.
+
+%% @private Safely extract started_at from metadata.
 -spec safe_started_at(term()) -> non_neg_integer().
 safe_started_at(Meta) when is_map(Meta) ->
     maps:get(started_at, Meta, 0);

@@ -3,6 +3,7 @@
 -behaviour(cowboy_handler).
 -export([init/2]).
 
+%% @doc Returns {status, node} for liveness probes.
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, State) ->
     case riak_admin_api_handler:ensure_admin_get(Req0) of

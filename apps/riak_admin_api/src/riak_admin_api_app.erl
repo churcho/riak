@@ -92,6 +92,7 @@ start(_StartType, _StartArgs) ->
     case riak_admin_api_sup:start_link(ListenerSpec) of
         {ok, SupPid} ->
             logger:info("[riak_admin] API started on port ~B (supervised)", [Port]),
+            audit_security_posture(),
             {ok, SupPid};
         {error, Reason} ->
             logger:error(
@@ -120,10 +121,12 @@ listener_child_spec(Port, Dispatch) ->
     ProtocolOpts = protocol_opts(),
     Env = #{env => #{dispatch => Dispatch}},
     ProtoOptsWithEnv = maps:merge(ProtocolOpts, Env),
+    MaxConns = application:get_env(
+        riak_admin_api, cowboy_max_connections, 1024),
     ranch:child_spec(
         riak_admin_http,
         ranch_tcp,
-        [{port, Port}],
+        [{port, Port}, {max_connections, MaxConns}],
         cowboy_clear,
         ProtoOptsWithEnv).
 
@@ -158,61 +161,95 @@ protocol_opts() ->
             riak_admin_api, cowboy_max_headers, 100)
     }.
 
-%% @doc Resolve the HTTP port for this node.
+%% @doc Log security posture warnings on startup.
+%%
+%% Checks authentication, authorization, and TLS configuration and
+%% emits appropriate log warnings when the API is running in an
+%% insecure configuration. Does not block startup — provides
+%% operational visibility into the security posture.
+-spec audit_security_posture() -> ok.
+audit_security_posture() ->
+    RequireAuth = application:get_env(
+        riak_admin_api, security_require_auth, false),
+    AuthnHook = application:get_env(
+        riak_admin_api, authn_hook, undefined),
+    AuthzHook = application:get_env(
+        riak_admin_api, authz_hook, undefined),
+    RequireTls = application:get_env(
+        riak_admin_api, security_require_tls, false),
+
+    HasAuthn = AuthnHook =/= undefined,
+    HasAuthz = AuthzHook =/= undefined,
+
+    case {RequireAuth, HasAuthn, HasAuthz} of
+        {false, false, false} ->
+            logger:warning("[riak_admin] SECURITY: API started with NO "
+                           "authentication or authorization. All endpoints "
+                           "are publicly accessible. Set "
+                           "security_require_auth=true and configure "
+                           "authn_hook/authz_hook for production.");
+        {false, true, false} ->
+            logger:warning("[riak_admin] SECURITY: authn_hook is configured "
+                           "but authz_hook is not. All authenticated users "
+                           "will have unrestricted access. Configure "
+                           "authz_hook for authorization enforcement.");
+        {false, false, true} ->
+            logger:warning("[riak_admin] SECURITY: authz_hook is configured "
+                           "but authn_hook is not. Authorization will run "
+                           "without an authenticated identity. Configure "
+                           "authn_hook for proper authentication.");
+        _ ->
+            ok
+    end,
+
+    case RequireTls of
+        false ->
+            logger:info("[riak_admin] TLS is not required. Set "
+                        "security_require_tls=true for encrypted transport.");
+        _ ->
+            ok
+    end,
+    ok.
+
+%% @doc Resolve the admin API HTTP port for this node.
+%% Admin API uses 100N5 (dev1=10015, dev2=10025, ...).
+-spec resolve_port() -> pos_integer().
+resolve_port() ->
+    resolve_devrel_port(http_port, 8099, 5).
+
+%% @doc Resolve the Riak HTTP port for this node.
+%% Riak HTTP uses 100N8 (dev1=10018, dev2=10028, ...).
+%% Stored in syn metadata so dashboards know how to reach each node.
+-spec resolve_riak_http_port() -> pos_integer().
+resolve_riak_http_port() ->
+    resolve_devrel_port(riak_http_port, 8098, 8).
+
+%% @private Resolve a port with devrel auto-assignment.
 %%
 %% In a devrel, each node is named devN@127.0.0.1 (N = 1..8).
-%% Other Riak listeners follow the 100N_ pattern:
-%%   - HTTP:     100N8 (dev1=10018, dev2=10028, ...)
-%%   - Protobuf: 100N7 (dev1=10017, dev2=10027, ...)
-%%
-%% The admin API uses 100N5 to avoid collisions:
-%%   - dev1=10015, dev2=10025, dev3=10035, ...
-%%
-%% Existing devrel port assignments per node (N = 1..8):
+%% Riak listeners follow the 100N_ pattern:
+%%   100N5 = admin API (Cowboy)
 %%   100N6 = cluster_manager
 %%   100N7 = protobuf
 %%   100N8 = HTTP (webmachine)
 %%   100N9 = handoff
 %%
 %% In production (single node, non-devN name), the configured
-%% default (8099) is used.
--spec resolve_port() -> pos_integer().
-resolve_port() ->
-    Default = application:get_env(riak_admin_api, http_port, 8099),
+%% default from application env is used.
+-spec resolve_devrel_port(atom(), pos_integer(), 0..9) -> pos_integer().
+resolve_devrel_port(EnvKey, Default, Offset) ->
+    Configured = application:get_env(riak_admin_api, EnvKey, Default),
     case node() of
         nonode@nohost ->
-            Default;
+            Configured;
         Node ->
             NodeStr = atom_to_list(Node),
             case re:run(NodeStr, "^dev([0-9]+)@", [{capture, [1], list}]) of
                 {match, [NStr]} ->
                     N = list_to_integer(NStr),
-                    10000 + N * 10 + 5;
+                    10000 + N * 10 + Offset;
                 nomatch ->
-                    Default
-            end
-    end.
-
-%% @doc Resolve the Riak HTTP port for this node.
-%%
-%% In a devrel, each node uses port 100N8 (dev1=10018, dev2=10028).
-%% In production, the configured default (8098) is used.
-%% This value is stored in syn metadata so dashboards know how to
-%% reach the Riak HTTP API on each node.
--spec resolve_riak_http_port() -> pos_integer().
-resolve_riak_http_port() ->
-    Default = application:get_env(riak_admin_api, riak_http_port, 8098),
-    case node() of
-        nonode@nohost ->
-            Default;
-        Node ->
-            NodeStr = atom_to_list(Node),
-            case re:run(NodeStr, "^dev([0-9]+)@", [{capture, [1], list}]) of
-                {match, [NStr]} ->
-                    N = list_to_integer(NStr),
-                    10000 + N * 10 + 8;
-                nomatch ->
-                    Default
+                    Configured
             end
     end.
 

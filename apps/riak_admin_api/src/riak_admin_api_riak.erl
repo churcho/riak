@@ -206,7 +206,7 @@ object_operation(_, _Context, _Input, _Client) ->
     query |
     mapred,
     map(),
-    map()) -> {ok, map()} | {error, map()}.
+    map()) -> {ok, map()} | {error, map()} | {stream, map(), function()}.
 bucket_operation(Action, Context, Input) ->
     case ensure_bucket_type(Context) of
         ok ->
@@ -400,16 +400,23 @@ write_no_body_reply(_Mode, _Context) ->
     #{status => 204, body => <<>>}.
 
 write_return_body_reply(Mode, Context, Input, Obj) ->
-    {ok, Reply0} = object_read_reply(Context, Input, Obj),
-    case Mode of
-        create ->
-            Headers = maps:get(headers, Reply0, #{}),
-            Reply0#{
-                status => 200,
-                headers => Headers#{<<"location">> => build_location(Context, maps:get(key, Context))}
-            };
-        _ ->
-            Reply0#{status => 200}
+    case object_read_reply(Context, Input, Obj) of
+        {ok, Reply0} ->
+            case Mode of
+                create ->
+                    Headers = maps:get(headers, Reply0, #{}),
+                    Reply0#{
+                        status => 200,
+                        headers => Headers#{<<"location">> => build_location(Context, maps:get(key, Context))}
+                    };
+                _ ->
+                    Reply0#{status => 200}
+            end;
+        {error, _} ->
+            %% Riak returned an object but its contents could not be read
+            %% (e.g. empty contents after tombstone race). Fall back to
+            %% a simple 204 so the handler doesn't crash.
+            write_no_body_reply(Mode, Context)
     end.
 
 build_store_doc(Context, Input) ->
@@ -480,7 +487,7 @@ conditional_put_options(Headers) ->
 %% S2 (CG-004): Strip quotes from ETag values (HTTP allows "tag" or tag).
 strip_etag_quotes(ETag) when is_binary(ETag) ->
     case ETag of
-        <<"\"", Rest/binary>> ->
+        <<"\"", Rest/binary>> when byte_size(Rest) > 0 ->
             case binary:last(Rest) of
                 $\" -> binary:part(Rest, 0, byte_size(Rest) - 1);
                 _ -> ETag
@@ -512,18 +519,9 @@ check_write_preconditions(Context, CondOpts, Client) ->
                 {error, notfound} ->
                     case IfMatch of
                         undefined -> ok;
-                        <<"*">> ->
-                            {error, #{
-                                status => 412,
-                                code => <<"precondition_failed">>,
-                                reason => <<"If-Match failed: object does not exist">>
-                            }};
                         _ ->
-                            {error, #{
-                                status => 412,
-                                code => <<"precondition_failed">>,
-                                reason => <<"If-Match failed: object does not exist">>
-                            }}
+                            {error, precondition_error(
+                                <<"If-Match failed: object does not exist">>)}
                     end;
                 {error, Reason} ->
                     logger:warning("[riak_admin] precondition read failed for ~p/~p: ~p — "
@@ -548,11 +546,8 @@ check_if_match(ExpectedETag, Obj, Next) ->
     case lists:member(ExpectedETag, Vtags) of
         true -> Next();
         false ->
-            {error, #{
-                status => 412,
-                code => <<"precondition_failed">>,
-                reason => <<"If-Match: ETag does not match current object">>
-            }}
+            {error, precondition_error(
+                <<"If-Match: ETag does not match current object">>)}
     end.
 
 check_if_unmodified_since(undefined, _Obj) ->
@@ -567,11 +562,8 @@ check_if_unmodified_since(DateStr, Obj) ->
                     ObjTime = lastmod_to_seconds(LastModified),
                     case ObjTime > CondTime of
                         true ->
-                            {error, #{
-                                status => 412,
-                                code => <<"precondition_failed">>,
-                                reason => <<"If-Unmodified-Since: object was modified">>
-                            }};
+                            {error, precondition_error(
+                                <<"If-Unmodified-Since: object was modified">>)};
                         false ->
                             ok
                     end;
@@ -624,13 +616,7 @@ maybe_set_vclock(Doc, Headers) ->
             end
     end.
 
-parse_content_type(undefined) ->
-    {error, #{
-        status => 400,
-        code => <<"missing_content_type">>,
-        reason => <<"Missing Content-Type request header">>
-    }};
-parse_content_type(<<>>) ->
+parse_content_type(CT) when CT =:= undefined; CT =:= <<>> ->
     {error, #{
         status => 400,
         code => <<"missing_content_type">>,
@@ -651,7 +637,7 @@ parse_charset([Param | Rest]) ->
     end.
 
 trim_binary(Bin) when is_binary(Bin) ->
-    list_to_binary(string:trim(binary_to_list(Bin))).
+    iolist_to_binary(string:trim(Bin)).
 
 accept_doc_value(<<"application/x-erlang-binary">>, Body) ->
     try binary_to_term(Body, [safe])
@@ -815,7 +801,7 @@ metadata_last_modified(Metadata) ->
     to_bin(
         case LastModified of
             Now = {_, _, _} ->
-                httpd_util:rfc1123_date(calendar:now_to_local_time(Now));
+                httpd_util:rfc1123_date(calendar:now_to_universal_time(Now));
             RFC1123 when is_list(RFC1123) ->
                 RFC1123;
             Value ->
@@ -921,7 +907,7 @@ normalize_boolean(Value) -> Value.
 
 normalize_sync_on_write(Value) when is_atom(Value) -> Value;
 normalize_sync_on_write(Value) when is_binary(Value) ->
-    case list_to_binary(string:lowercase(binary_to_list(Value))) of
+    case string:lowercase(Value) of
         <<"backend">> -> backend;
         <<"one">> -> one;
         <<"all">> -> all;
@@ -988,11 +974,34 @@ with_object_client(Fun) ->
             {error, object_error_map({client_error, Reason})}
     end.
 
+%% @private Shared error map constructors.
+%% These eliminate repetitive #{status => N, code => ..., reason => ...}
+%% construction across the module.
+
+invalid_body_error(Reason) ->
+    #{status => 400, code => <<"invalid_body">>, reason => to_bin(Reason)}.
+
+precondition_error(Reason) ->
+    #{status => 412, code => <<"precondition_failed">>, reason => Reason}.
+
+index_query_error(Reason) ->
+    logger:info("[riak_admin] invalid index query: ~p", [Reason]),
+    #{status => 400, code => <<"invalid_query">>,
+      reason => <<"Invalid index query">>}.
+
 -spec object_error_map(term()) -> map().
 object_error_map(precommit_fail) ->
     #{status => 403, code => <<"forbidden">>, reason => <<"pre-commit hook failed">>};
+object_error_map({precommit_fail, Message}) when is_binary(Message) ->
+    #{status => 403, code => <<"forbidden">>, reason => Message};
+object_error_map({precommit_fail, Message}) when is_list(Message) ->
+    #{status => 403, code => <<"forbidden">>,
+      reason => list_to_binary(Message)};
 object_error_map({precommit_fail, Message}) ->
-    #{status => 403, code => <<"forbidden">>, reason => to_bin(Message)};
+    logger:warning("[riak_admin] precommit hook returned non-binary: ~p",
+                   [Message]),
+    #{status => 403, code => <<"forbidden">>,
+      reason => <<"pre-commit hook failed">>};
 object_error_map(too_many_fails) ->
     #{status => 503, code => <<"quorum_unsatisfied">>,
       reason => <<"Too many write failures to satisfy W/DW">>};
@@ -1027,20 +1036,25 @@ object_error_map({node_confirms_val_unsatisfied, Requested, Returned}) ->
       reason => iolist_to_binary(io_lib:format(
           "node_confirms-value unsatisfied: ~p/~p", [Returned, Requested]))};
 object_error_map(failed) ->
-    #{status => 412, code => <<"precondition_failed">>, reason => <<"precondition failed">>};
+    precondition_error(<<"precondition failed">>);
 object_error_map("match_found") ->
-    #{status => 412, code => <<"precondition_failed">>, reason => <<"precondition failed">>};
+    precondition_error(<<"precondition failed">>);
 object_error_map("modified") ->
     #{status => 409, code => <<"conflict">>, reason => <<"object was modified">>};
 object_error_map(invalid_vclock) ->
     #{status => 400, code => <<"invalid_vclock">>, reason => <<"Invalid vector clock">>};
 object_error_map({client_error, Reason}) ->
-    #{status => 503, code => <<"backend_unavailable">>, reason => to_bin(Reason)};
+    logger:warning("[riak_admin] client error: ~p", [Reason]),
+    #{status => 503, code => <<"backend_unavailable">>,
+      reason => <<"Backend service temporarily unavailable">>};
 object_error_map({Class, Reason}) when is_atom(Class) ->
+    logger:warning("[riak_admin] unhandled error: ~p:~p", [Class, Reason]),
     #{status => 500, code => <<"backend_error">>,
-      reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))};
+      reason => <<"Internal server error">>};
 object_error_map(Reason) ->
-    #{status => 500, code => <<"backend_error">>, reason => to_bin(Reason)}.
+    logger:warning("[riak_admin] unknown error: ~p", [Reason]),
+    #{status => 500, code => <<"backend_error">>,
+      reason => <<"Internal server error">>}.
 
 bucket_props_ref(Context) ->
     maybe_bucket_type_ref(maps:get(bucket_type, Context, <<"default">>),
@@ -1075,16 +1089,19 @@ decode_bucket_props_body(Body) ->
     end.
 
 bucket_error_map(invalid_body) ->
-    #{
-        status => 400,
-        code => <<"invalid_body">>,
-        reason => <<"Body must be JSON: {\"props\": {...}}">>
-    };
-bucket_error_map({invalid_props, Details}) ->
+    invalid_body_error(<<"Body must be JSON: {\"props\": {...}}">>);
+bucket_error_map({invalid_props, Details}) when is_binary(Details) ->
     #{
         status => 400,
         code => <<"invalid_props">>,
-        reason => to_bin(Details)
+        reason => Details
+    };
+bucket_error_map({invalid_props, Details}) ->
+    logger:info("[riak_admin] invalid bucket props: ~p", [Details]),
+    #{
+        status => 400,
+        code => <<"invalid_props">>,
+        reason => <<"Invalid bucket properties">>
     };
 bucket_error_map(Reason) ->
     object_error_map(Reason).
@@ -1104,7 +1121,10 @@ bucket_list_operation(Context, Client) ->
             {ok, json_backend_reply(200, encode_bucket_list([]))}
     end.
 
-list_buckets_reply(BucketType, Timeout, Client) ->
+list_buckets_reply(BucketType, Timeout0, Client) ->
+    %% Cap timeout to stream_collection_ceiling to prevent unbounded
+    %% handler blocking on non-streaming bucket list operations.
+    Timeout = cap_timeout(Timeout0, stream_collection_ceiling()),
     case riak_client:list_buckets(none, Timeout, BucketType, Client) of
         {ok, Buckets} ->
             {ok, json_backend_reply(200, encode_bucket_list(Buckets))};
@@ -1200,8 +1220,8 @@ encode_bucket_stream_timeout() ->
 encode_stream_error(Reason) when is_atom(Reason); is_binary(Reason) ->
     mochijson2:encode({struct, [{error, Reason}]});
 encode_stream_error(Reason) ->
-    mochijson2:encode({struct, [{error,
-        iolist_to_binary(io_lib:format("~p", [Reason]))}]}).
+    logger:warning("[riak_admin] sanitized stream error: ~p", [Reason]),
+    mochijson2:encode({struct, [{error, <<"Internal server error">>}]}).
 
 key_list_operation(Context, Client) ->
     Query = maps:get(query, Context, #{}),
@@ -1237,7 +1257,10 @@ key_list_props_enabled(Query) ->
         _ -> true
     end.
 
-list_keys_reply(Bucket, Timeout, BucketPropsJson, Client) ->
+list_keys_reply(Bucket, Timeout0, BucketPropsJson, Client) ->
+    %% Cap timeout to stream_collection_ceiling to prevent unbounded
+    %% handler blocking on non-streaming key list operations.
+    Timeout = cap_timeout(Timeout0, stream_collection_ceiling()),
     case riak_client:list_keys(Bucket, Timeout, Client) of
         {ok, KeyList} ->
             Body = mochijson2:encode({struct, BucketPropsJson ++ [{?JSON_KEYS, KeyList}]}),
@@ -1306,7 +1329,9 @@ stream_keys_reply(Bucket, Timeout0, BucketPropsJson, Context, Client) ->
 key_stream_timeout(undefined) ->
     ?DEFAULT_KEY_STREAM_TIMEOUT;
 key_stream_timeout(infinity) ->
-    infinity;
+    %% Never pass infinity — cap to the stream collection ceiling
+    %% to prevent unbounded handler blocking (DoS vector).
+    stream_collection_ceiling();
 key_stream_timeout(Timeout) when is_integer(Timeout), Timeout >= 0 ->
     Timeout;
 key_stream_timeout(_) ->
@@ -1387,6 +1412,15 @@ encode_key_stream_error(Reason) ->
 -spec stream_collection_ceiling() -> pos_integer().
 stream_collection_ceiling() ->
     application:get_env(riak_admin_api, stream_collection_ceiling_ms, 300000).
+
+%% @doc Cap a timeout value to a maximum ceiling. Handles undefined and
+%% infinity by returning the ceiling, and caps integer values with min/2.
+-spec cap_timeout(undefined | infinity | non_neg_integer(), pos_integer()) ->
+    pos_integer().
+cap_timeout(undefined, Ceiling) -> Ceiling;
+cap_timeout(infinity, Ceiling) -> Ceiling;
+cap_timeout(Timeout, Ceiling) when is_integer(Timeout) ->
+    erlang:min(Timeout, Ceiling).
 
 %% @doc Return whether incremental streaming is enabled.
 %%
@@ -1585,10 +1619,7 @@ maybe_crdt_counter_redirect(Context) ->
 %% redirect in maybe_crdt_counter_redirect/1 but covers the POST-to-create case.
 maybe_crdt_collection_redirect(Context) ->
     case {maps:get(bucket_type, Context, <<"default">>), maps:get(key, Context, undefined)} of
-        {<<"default">>, undefined} ->
-            Bucket = maps:get(bucket, Context, <<>>),
-            {redirect, <<"/buckets/", Bucket/binary, "/counters">>};
-        {<<"default">>, <<>>} ->
+        {<<"default">>, Key} when Key =:= undefined; Key =:= <<>> ->
             Bucket = maps:get(bucket, Context, <<>>),
             {redirect, <<"/buckets/", Bucket/binary, "/counters">>};
         _ ->
@@ -1612,26 +1643,21 @@ counter_to_crdt_op(Amount) ->
     {decrement, -Amount}.
 
 counter_delta_from_body(Body0) ->
-    Body = string:trim(binary_to_list(to_bin(Body0))),
+    Body = iolist_to_binary(string:trim(to_bin(Body0))),
     case Body of
-        [] ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_body">>,
-                reason => <<"Counter update body must be an integer">>
-            }};
+        <<>> ->
+            {error, counter_body_error()};
         _ ->
             try
-                {ok, list_to_integer(Body)}
+                {ok, binary_to_integer(Body)}
             catch
                 error:badarg ->
-                    {error, #{
-                        status => 400,
-                        code => <<"invalid_body">>,
-                        reason => <<"Counter update body must be an integer">>
-                    }}
+                    {error, counter_body_error()}
             end
     end.
+
+counter_body_error() ->
+    invalid_body_error(<<"Counter update body must be an integer">>).
 
 crdt_bucket_module(Context) ->
     BucketType = maps:get(bucket_type, Context, <<"default">>),
@@ -1677,40 +1703,25 @@ crdt_decode_update_body(Type, Body) ->
         {ok, Op, OpCtx}
     catch
         throw:{invalid_operation, {BadType, BadOp}} ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_body">>,
-                reason => iolist_to_binary([
-                    <<"Invalid operation on datatype '">>,
-                    to_bin(BadType),
-                    <<"': ">>,
-                    mochijson2:encode(BadOp),
-                    <<"\n">>
-                ])
-            }};
+            {error, invalid_body_error(iolist_to_binary([
+                <<"Invalid operation on datatype '">>,
+                to_bin(BadType),
+                <<"': ">>,
+                mochijson2:encode(BadOp),
+                <<"\n">>
+            ]))};
         throw:{invalid_field_name, Field} ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_body">>,
-                reason => iolist_to_binary([
-                    <<"Invalid map field name '">>,
-                    Field,
-                    <<"'\n">>
-                ])
-            }};
+            {error, invalid_body_error(iolist_to_binary([
+                <<"Invalid map field name '">>,
+                Field,
+                <<"'\n">>
+            ]))};
         throw:invalid_utf8 ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_body">>,
-                reason => <<"Malformed JSON submitted, invalid UTF-8">>
-            }};
+            {error, invalid_body_error(
+                <<"Malformed JSON submitted, invalid UTF-8">>)};
         _Class:Reason ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_body">>,
-                reason => iolist_to_binary(io_lib:format(
-                    "Couldn't decode JSON: ~p~n", [Reason]))
-            }}
+            logger:info("[riak_admin] CRDT JSON decode error: ~p", [Reason]),
+            {error, invalid_body_error(<<"Couldn't decode CRDT update JSON">>)}
     end.
 
 crdt_response_body(Type, Mod, Obj, IncludeContext) ->
@@ -1823,17 +1834,9 @@ build_index_request(Context) ->
                     {error, Error}
             end;
         {error, Reason} ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_query">>,
-                reason => iolist_to_binary(io_lib:format("Invalid query: ~p", [Reason]))
-            }};
+            {error, index_query_error(Reason)};
         {'EXIT', Reason} ->
-            {error, #{
-                status => 400,
-                code => <<"invalid_query">>,
-                reason => iolist_to_binary(io_lib:format("Invalid query: ~p", [Reason]))
-            }}
+            {error, index_query_error(Reason)}
     end.
 
 index_terms(Context) ->
@@ -1861,12 +1864,11 @@ validate_index_term_regex(TermRegex, IndexQuery) ->
                 _ ->
                     ok
             end;
-        {error, ReError} ->
+        {error, _ReError} ->
             {error, #{
                 status => 400,
                 code => <<"invalid_query">>,
-                reason => iolist_to_binary(io_lib:format(
-                    "Invalid term regular expression ~p : ~p", [TermRegex, ReError]))
+                reason => <<"Invalid term regular expression">>
             }}
     end.
 
@@ -1896,7 +1898,10 @@ stream_index_reply(Request, Client) ->
     Boundary = list_to_binary(riak_core_util:unique_id_62()),
     case riak_client:stream_get_index(Bucket, Query, Opts, Client) of
         {ok, ReqId, FSMPid} ->
-            Timeout = proplists:get_value(timeout, Opts, infinity),
+            %% Apply stream_collection_ceiling to prevent unbounded blocking,
+            %% consistent with key and bucket stream paths.
+            Timeout0 = proplists:get_value(timeout, Opts, infinity),
+            Timeout = erlang:min(Timeout0, stream_collection_ceiling()),
             case stream_incremental_enabled() of
                 true ->
                     %% S2 (CG-001): True incremental streaming
@@ -1905,20 +1910,32 @@ stream_index_reply(Request, Client) ->
                         content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
                     },
                     ChunkFun = fun(Emit) ->
-                        stream_index_chunked(
-                            ReqId, FSMPid, Boundary, ReturnTerms,
-                            MaxResults, Timeout, undefined, 0, Emit)
+                        try
+                            stream_index_chunked(
+                                ReqId, FSMPid, Boundary, ReturnTerms,
+                                MaxResults, Timeout, undefined, 0, Emit)
+                        catch
+                            ExnClass:ExnReason:ExnStack ->
+                                catch whack_index_fsm(ReqId, FSMPid),
+                                erlang:raise(ExnClass, ExnReason, ExnStack)
+                        end
                     end,
                     {stream, StreamInit, ChunkFun};
                 false ->
-                    Body = collect_stream_index(
-                        ReqId, FSMPid, Boundary, ReturnTerms, MaxResults,
-                        Timeout, undefined, 0, []),
-                    {ok, #{
-                        status => 200,
-                        body => Body,
-                        content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
-                    }}
+                    try
+                        Body = collect_stream_index(
+                            ReqId, FSMPid, Boundary, ReturnTerms, MaxResults,
+                            Timeout, undefined, 0, []),
+                        {ok, #{
+                            status => 200,
+                            body => Body,
+                            content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
+                        }}
+                    catch
+                        ExnClass:ExnReason:ExnStack ->
+                            catch whack_index_fsm(ReqId, FSMPid),
+                            erlang:raise(ExnClass, ExnReason, ExnStack)
+                    end
             end;
         {error, Reason} ->
             {error, bucket_error_map(Reason)}
@@ -2091,7 +2108,8 @@ decode_query_json_body(Body) ->
         end
     catch
         error:Reason ->
-            {error, iolist_to_binary(io_lib:format("Malformed json request - ~p", [Reason]))}
+            logger:info("[riak_admin] query JSON decode error: ~p", [Reason]),
+            {error, <<"Malformed JSON in request body">>}
     end.
 
 validate_query_request_body(QueryMap) ->
@@ -2163,13 +2181,15 @@ check_query_keys(Keys, RequiredKeys, PossibleKeys) ->
                     ok;
                 _NotAllKeys ->
                     ExtraKeys = lists:subtract(Keys, PossibleKeyList),
-                    {error, iolist_to_binary(io_lib:format(
-                        "Unexpected keys in request ~p", [ExtraKeys]))}
+                    {error, iolist_to_binary([
+                        <<"Unexpected keys in request: ">>,
+                        lists:join(<<", ">>, ExtraKeys)])}
             end;
         _NotAllRequiredKeys ->
             MissingKeys = lists:subtract(RequiredKeys, RequiredKeyList),
-            {error, iolist_to_binary(io_lib:format(
-                "Missing required keys in request ~p", [MissingKeys]))}
+            {error, iolist_to_binary([
+                <<"Missing required keys in request: ">>,
+                lists:join(<<", ">>, MissingKeys)])}
     end.
 
 make_complex_query(BucketType, QueryMap) ->
@@ -2297,11 +2317,12 @@ execute_query(Query, AccOpt, Client) ->
         {error, timeout} ->
             {error, object_error_map(timeout)};
         {error, Reason} ->
+            logger:warning("[riak_admin] query failed (option=~w): ~p",
+                           [AccOpt, Reason]),
             {error, #{
                 status => 500,
                 code => <<"backend_error">>,
-                reason => iolist_to_binary(io_lib:format(
-                    "Query with option ~w failed - ~p", [AccOpt, Reason]))
+                reason => <<"Query operation failed">>
             }};
         {JsonEncodedResults, none} when is_binary(JsonEncodedResults) ->
             {ok, json_backend_reply(200, JsonEncodedResults)};
@@ -2315,49 +2336,47 @@ execute_query(Query, AccOpt, Client) ->
                 headers => #{?QUERY_CONTINUATION_HEADER => to_bin(Continuation)}
             }};
         Other ->
+            logger:warning("[riak_admin] unexpected query reply: ~p", [Other]),
             {error, #{
                 status => 500,
                 code => <<"backend_error">>,
-                reason => iolist_to_binary(io_lib:format("Unexpected query reply: ~p", [Other]))
+                reason => <<"Unexpected query result">>
             }}
     end.
 
 query_invalid_body_error(Reason) ->
-    #{
-        status => 400,
-        code => <<"invalid_body">>,
-        reason => to_bin(Reason)
-    }.
+    invalid_body_error(Reason).
 
 query_validation_error(Stage, Reason) ->
+    logger:info("[riak_admin] query validation failure at ~p: ~p",
+                [Stage, Reason]),
     #{
         status => 400,
         code => <<"invalid_query">>,
-        reason => iolist_to_binary(io_lib:format(
-            "Validation failure at stage ~p due to ~ts",
-            [Stage, to_bin(Reason)]))
+        reason => <<"Query validation failed">>
     }.
 
-mapred_operation(_Context, Input, _Client) ->
+mapred_operation(Context, Input, _Client) ->
     case mapred_backend_enabled() of
         false ->
             {error, mapred_disabled_error()};
         true ->
-            case mapred_body_map(Input) of
-                {ok, BodyMap} ->
-                    case validate_mapred_body(BodyMap) of
-                        ok ->
-                            case mapred_backend_available() of
-                                true ->
-                                    mapred_operation_legacy(Input);
-                                false ->
-                                    {error, mapred_unavailable_error()}
-                            end;
-                        {error, Reason} ->
-                            {error, mapred_invalid_body_error(Reason)}
-                    end;
+            mapred_operation_checked(Context, Input)
+    end.
+
+mapred_operation_checked(Context, Input) ->
+    case mapred_body_map(Input) of
+        {error, Reason} ->
+            {error, mapred_invalid_body_error(Reason)};
+        {ok, BodyMap} ->
+            case validate_mapred_body(BodyMap) of
                 {error, Reason} ->
-                    {error, mapred_invalid_body_error(Reason)}
+                    {error, mapred_invalid_body_error(Reason)};
+                ok ->
+                    case mapred_backend_available() of
+                        true -> mapred_operation_legacy(Context, Input);
+                        false -> {error, mapred_unavailable_error()}
+                    end
             end
     end.
 
@@ -2409,32 +2428,35 @@ mapred_disabled_error() ->
     }.
 
 mapred_invalid_body_error(Reason) ->
-    #{
-        status => 400,
-        code => <<"invalid_body">>,
-        reason => to_bin(Reason)
-    }.
+    invalid_body_error(Reason).
 
-mapred_operation_legacy(Input) ->
+mapred_operation_legacy(Context, Input) ->
     Body = maps:get(body, Input, <<>>),
-    QueryParams = maps:get(query, Input, #{}),
-    Chunked = maps:get(<<"chunked">>, QueryParams, false),
+    QueryParams = maps:get(query, Context, #{}),
+    Chunked = query_truthy(<<"chunked">>, QueryParams),
     case riak_kv_mapred_json:parse_request(Body) of
         {ok, ParsedInputs, ParsedQuery, Timeout} ->
             case riak_kv_mrc_pipe:mapred_stream_sink(ParsedInputs, ParsedQuery, Timeout) of
                 {ok, Mrc} ->
-                    case Chunked of
-                        true ->
-                            mapred_collect_chunked_reply(Mrc, ParsedQuery);
-                        _ ->
-                            mapred_collect_nonchunked_reply(Mrc, ParsedQuery)
+                    try
+                        case Chunked of
+                            true ->
+                                mapred_collect_chunked_reply(Mrc, ParsedQuery);
+                            _ ->
+                                mapred_collect_nonchunked_reply(Mrc, ParsedQuery)
+                        end
+                    catch
+                        ExnClass:ExnReason:ExnStack ->
+                            catch riak_kv_mrc_pipe:destroy_sink(Mrc),
+                            erlang:raise(ExnClass, ExnReason, ExnStack)
                     end;
                 {error, {Fitting, Reason}} ->
+                    logger:info("[riak_admin] mapred phase error at ~p: ~p",
+                                [Fitting, Reason]),
                     {error, #{
                         status => 400,
                         code => <<"invalid_query">>,
-                        reason => iolist_to_binary(io_lib:format(
-                            "MapReduce phase ~p error: ~ts", [Fitting, to_bin(Reason)]))
+                        reason => <<"MapReduce phase configuration error">>
                     }}
             end;
         {error, Reason} ->
@@ -2463,7 +2485,7 @@ mapred_collect_nonchunked_reply(Mrc, ParsedQuery) ->
         {error, {From, Info}} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
-            {error, mapred_backend_error(Json)}
+            {error, mapred_backend_error(iolist_to_binary(mochijson2:encode(Json)))}
     end.
 
 mapred_collect_chunked_reply(Mrc, ParsedQuery) ->
@@ -2477,7 +2499,13 @@ mapred_collect_chunked_reply(Mrc, ParsedQuery) ->
                 content_type => <<"multipart/mixed;boundary=", Boundary/binary>>
             },
             ChunkFun = fun(Emit) ->
-                mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit)
+                try
+                    mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit)
+                catch
+                    ExnClass:ExnReason:ExnStack ->
+                        catch riak_kv_mrc_pipe:destroy_sink(Mrc),
+                        erlang:raise(ExnClass, ExnReason, ExnStack)
+                end
             end,
             {stream, StreamInit, ChunkFun};
         false ->
@@ -2518,7 +2546,7 @@ mapred_collect_chunked_parts(Mrc, Boundary, HasMRQuery, Acc) ->
         {error, {From, Info}, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
-            {error, mapred_backend_error(Json)}
+            {error, mapred_backend_error(iolist_to_binary(mochijson2:encode(Json)))}
     end.
 
 %% S2 (CG-001): Incremental streaming for chunked mapreduce.
@@ -2554,7 +2582,7 @@ mapred_stream_chunked_parts(Mrc, Boundary, HasMRQuery, Emit) ->
         {error, {From, Info}, _} ->
             riak_kv_mrc_pipe:destroy_sink(Mrc),
             Json = riak_kv_mapred_json:jsonify_pipe_error(From, Info),
-            Emit(mapred_error_part(to_bin(Json), Boundary), fin)
+            Emit(mapred_error_part(mochijson2:encode(Json), Boundary), fin)
     end.
 
 mapred_jsonify_results(Results) ->
@@ -2594,28 +2622,27 @@ mapred_error_part(ErrorJson, Boundary) ->
     ]).
 
 mapred_parse_error({'query', Reason}) ->
-    mapred_invalid_body_error(iolist_to_binary(
-        ["An error occurred parsing the \"query\" field.\n", io_lib:format("~p", [Reason])]));
+    logger:info("[riak_admin] mapred query parse error: ~p", [Reason]),
+    mapred_invalid_body_error(<<"An error occurred parsing the \"query\" field.">>);
 mapred_parse_error({inputs, Reason}) ->
-    mapred_invalid_body_error(iolist_to_binary(
-        ["An error occurred parsing the \"inputs\" field.\n", io_lib:format("~p", [Reason])]));
+    logger:info("[riak_admin] mapred inputs parse error: ~p", [Reason]),
+    mapred_invalid_body_error(<<"An error occurred parsing the \"inputs\" field.">>);
 mapred_parse_error(missing_field) ->
     mapred_invalid_body_error(<<"The POST body was missing the \"inputs\" or \"query\" field.">>);
-mapred_parse_error({invalid_json, Message}) ->
-    mapred_invalid_body_error(iolist_to_binary(
-        io_lib:format(
-            "The POST body was not valid JSON. The error from the parser was: ~p",
-            [Message])));
+mapred_parse_error({invalid_json, _Message}) ->
+    mapred_invalid_body_error(<<"The POST body was not valid JSON.">>);
 mapred_parse_error(not_json) ->
     mapred_invalid_body_error(<<"The POST body was not a JSON object.">>);
 mapred_parse_error(Reason) ->
-    mapred_invalid_body_error(io_lib:format("~p", [Reason])).
+    logger:info("[riak_admin] mapred parse error: ~p", [Reason]),
+    mapred_invalid_body_error(<<"Invalid MapReduce request">>).
 
 mapred_backend_error(Reason) ->
+    logger:warning("[riak_admin] mapred backend error: ~p", [Reason]),
     #{
         status => 500,
         code => <<"backend_error">>,
-        reason => to_bin(Reason)
+        reason => <<"MapReduce operation failed">>
     }.
 
 %% @doc Unified mapred timeout error map.
@@ -3019,8 +3046,10 @@ remote_dcs() ->
 %%% ============================================================
 
 %% @private Format a syn group member into a dc_info map.
+%% Meta is term() per syn's API — guard against non-map metadata
+%% (possible during cluster convergence or corrupt registrations).
 -spec format_dc_member({pid(), term()}, binary()) -> dc_info().
-format_dc_member({_Pid, Meta}, LocalDC) ->
+format_dc_member({_Pid, Meta}, LocalDC) when is_map(Meta) ->
     DC = maps:get(dc, Meta, <<"unknown">>),
     Node = maps:get(node, Meta, unknown),
     Port = maps:get(http_port, Meta, 8099),
@@ -3037,6 +3066,17 @@ format_dc_member({_Pid, Meta}, LocalDC) ->
         node => Node,
         reachable => true,
         started_at => maps:get(started_at, Meta, 0)
+    };
+format_dc_member({_Pid, _Meta}, _LocalDC) ->
+    #{
+        name => <<"unknown">>,
+        local => false,
+        admin_url => <<"http://127.0.0.1:8099">>,
+        riak_url => <<"http://127.0.0.1:8098">>,
+        riak_version => <<"unknown">>,
+        node => unknown,
+        reachable => true,
+        started_at => 0
     }.
 
 %% @private Extract hostname from node atom.

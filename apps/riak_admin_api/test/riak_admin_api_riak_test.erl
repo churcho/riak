@@ -323,96 +323,47 @@ mapred_timeout_error_map_returns_503_test() ->
 %%% ============================================================
 
 list_keys_error_mode_default_compat_test() ->
-    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
-    application:unset_env(riak_admin_api, list_keys_error_mode),
-    try
+    riak_admin_api_test_helpers:with_app_env(list_keys_error_mode, unset, fun() ->
         ?assertEqual(compat, riak_admin_api_riak:list_keys_error_mode())
-    after
-        case OldVal of
-            undefined -> ok;
-            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
-        end
-    end.
+    end).
 
 list_keys_error_mode_strict_test() ->
-    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
-    application:set_env(riak_admin_api, list_keys_error_mode, strict),
-    try
+    riak_admin_api_test_helpers:with_app_env(list_keys_error_mode, strict, fun() ->
         ?assertEqual(strict, riak_admin_api_riak:list_keys_error_mode())
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, list_keys_error_mode);
-            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
-        end
-    end.
+    end).
 
 list_keys_error_mode_invalid_falls_back_to_compat_test() ->
-    OldVal = application:get_env(riak_admin_api, list_keys_error_mode),
-    application:set_env(riak_admin_api, list_keys_error_mode, <<"invalid">>),
-    try
+    riak_admin_api_test_helpers:with_app_env(list_keys_error_mode, <<"invalid">>, fun() ->
         ?assertEqual(compat, riak_admin_api_riak:list_keys_error_mode())
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, list_keys_error_mode);
-            {ok, V} -> application:set_env(riak_admin_api, list_keys_error_mode, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S1: stream_collection_ceiling/0 (CG-016)
 %%% ============================================================
 
 stream_collection_ceiling_default_test() ->
-    OldVal = application:get_env(riak_admin_api, stream_collection_ceiling_ms),
-    application:unset_env(riak_admin_api, stream_collection_ceiling_ms),
-    try
+    riak_admin_api_test_helpers:with_app_env(stream_collection_ceiling_ms, unset, fun() ->
         ?assertEqual(300000, riak_admin_api_riak:stream_collection_ceiling())
-    after
-        case OldVal of
-            undefined -> ok;
-            {ok, V} -> application:set_env(riak_admin_api, stream_collection_ceiling_ms, V)
-        end
-    end.
+    end).
 
 stream_collection_ceiling_override_test() ->
-    OldVal = application:get_env(riak_admin_api, stream_collection_ceiling_ms),
-    application:set_env(riak_admin_api, stream_collection_ceiling_ms, 60000),
-    try
+    riak_admin_api_test_helpers:with_app_env(stream_collection_ceiling_ms, 60000, fun() ->
         ?assertEqual(60000, riak_admin_api_riak:stream_collection_ceiling())
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, stream_collection_ceiling_ms);
-            {ok, V} -> application:set_env(riak_admin_api, stream_collection_ceiling_ms, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S2 (CG-001): stream_incremental_enabled/0
 %%% ============================================================
 
 stream_incremental_enabled_default_true_test() ->
-    OldVal = application:get_env(riak_admin_api, stream_incremental_enabled),
-    application:unset_env(riak_admin_api, stream_incremental_enabled),
-    try
+    riak_admin_api_test_helpers:with_app_env(stream_incremental_enabled, unset, fun() ->
         ?assertEqual(true, riak_admin_api_riak:stream_incremental_enabled())
-    after
-        case OldVal of
-            undefined -> ok;
-            {ok, V} -> application:set_env(riak_admin_api, stream_incremental_enabled, V)
-        end
-    end.
+    end).
 
 stream_incremental_enabled_override_false_test() ->
-    OldVal = application:get_env(riak_admin_api, stream_incremental_enabled),
-    application:set_env(riak_admin_api, stream_incremental_enabled, false),
-    try
+    riak_admin_api_test_helpers:with_app_env(stream_incremental_enabled, false, fun() ->
         ?assertEqual(false, riak_admin_api_riak:stream_incremental_enabled())
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, stream_incremental_enabled);
-            {ok, V} -> application:set_env(riak_admin_api, stream_incremental_enabled, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S2 (CG-004): check_write_preconditions/3
@@ -431,28 +382,14 @@ check_write_preconditions_no_conditions_passes_test() ->
 %%% ============================================================
 
 mapred_backend_enabled_default_true_test() ->
-    OldVal = application:get_env(riak_admin_api, mapred_backend_enabled),
-    application:unset_env(riak_admin_api, mapred_backend_enabled),
-    try
+    riak_admin_api_test_helpers:with_app_env(mapred_backend_enabled, unset, fun() ->
         ?assertEqual(true, riak_admin_api_riak:mapred_backend_enabled())
-    after
-        case OldVal of
-            undefined -> ok;
-            {ok, V} -> application:set_env(riak_admin_api, mapred_backend_enabled, V)
-        end
-    end.
+    end).
 
 mapred_backend_enabled_override_false_test() ->
-    OldVal = application:get_env(riak_admin_api, mapred_backend_enabled),
-    application:set_env(riak_admin_api, mapred_backend_enabled, false),
-    try
+    riak_admin_api_test_helpers:with_app_env(mapred_backend_enabled, false, fun() ->
         ?assertEqual(false, riak_admin_api_riak:mapred_backend_enabled())
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, mapred_backend_enabled);
-            {ok, V} -> application:set_env(riak_admin_api, mapred_backend_enabled, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S2 (CG-007): maybe_crdt_collection_redirect/1

@@ -157,26 +157,16 @@ protocol_opts_returns_default_values_test() ->
     ?assertEqual(100, maps:get(max_headers, Opts)).
 
 protocol_opts_respects_env_overrides_test() ->
-    OldTimeout = application:get_env(riak_admin_api, cowboy_idle_timeout),
-    OldMaxKeep = application:get_env(riak_admin_api, cowboy_max_keepalive),
-    application:set_env(riak_admin_api, cowboy_idle_timeout, 120000),
-    application:set_env(riak_admin_api, cowboy_max_keepalive, 200),
-    try
+    riak_admin_api_test_helpers:with_app_envs([
+        {cowboy_idle_timeout, 120000},
+        {cowboy_max_keepalive, 200}
+    ], fun() ->
         Opts = riak_admin_api_app:protocol_opts(),
         ?assertEqual(120000, maps:get(idle_timeout, Opts)),
         ?assertEqual(200, maps:get(max_keepalive, Opts)),
         %% Unchanged values retain defaults
         ?assertEqual(30000, maps:get(request_timeout, Opts))
-    after
-        case OldTimeout of
-            undefined -> application:unset_env(riak_admin_api, cowboy_idle_timeout);
-            {ok, V1} -> application:set_env(riak_admin_api, cowboy_idle_timeout, V1)
-        end,
-        case OldMaxKeep of
-            undefined -> application:unset_env(riak_admin_api, cowboy_max_keepalive);
-            {ok, V2} -> application:set_env(riak_admin_api, cowboy_max_keepalive, V2)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% Routes
