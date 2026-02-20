@@ -87,8 +87,8 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({ring_update, Ring}, State) ->
-    State1 = handle_ring_update(Ring, State),
+handle_cast(ring_changed, State) ->
+    State1 = handle_ring_changed(State),
     {noreply, State1};
 handle_cast({service_update, Services}, State) ->
     State1 = handle_service_update(Services, State),
@@ -130,14 +130,22 @@ terminate(Reason, _State) ->
 %%% Push-based event handling
 %%% ============================================================
 
-handle_ring_update(Ring, State) ->
-    %% Extract ring ownership data
-    RingData = extract_ring_data(Ring),
-    State1 = publish_and_store(<<"ring">>, RingData, State),
-
-    %% Extract cluster status data from the same ring
-    ClusterData = extract_cluster_data(Ring),
-    publish_and_store(<<"cluster">>, ClusterData, State1).
+%% @private Fetch the current ring and extract data for publication.
+%% The callback casts a lightweight `ring_changed` signal instead of
+%% the full Ring term to avoid copying a multi-megabyte record into
+%% the gen_server mailbox on every ring event.
+handle_ring_changed(State) ->
+    try riak_core_ring_manager:get_my_ring() of
+        {ok, Ring} ->
+            RingData = extract_ring_data(Ring),
+            State1 = publish_and_store(<<"ring">>, RingData, State),
+            ClusterData = extract_cluster_data(Ring),
+            publish_and_store(<<"cluster">>, ClusterData, State1);
+        _Err ->
+            State
+    catch
+        _:_ -> State
+    end.
 
 handle_service_update(Services, #{last_services := LastServices} = State) ->
     Events = diff_services(LastServices, Services),
@@ -320,8 +328,8 @@ maybe_publish_changed(Topic, Data, #{snapshots := Snaps} = State) ->
 
 publish_event(Topic, Data) ->
     try
-        case syn:publish(?SCOPE, ?GROUP_EVENTS,
-                         {event, node(), {Topic, Data}}) of
+        case syn:local_publish(?SCOPE, ?GROUP_EVENTS,
+                               {event, node(), {Topic, Data}}) of
             {ok, _RecipientCount} ->
                 ok;
             {error, Reason} ->
@@ -340,8 +348,8 @@ publish_event(Topic, Data) ->
 
 subscribe_ring_events() ->
     try
-        case riak_core_ring_events:add_sup_callback(fun(Ring) ->
-            gen_server:cast(?MODULE, {ring_update, Ring})
+        case riak_core_ring_events:add_sup_callback(fun(_Ring) ->
+            gen_server:cast(?MODULE, ring_changed)
         end) of
             ok ->
                 ok;

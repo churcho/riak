@@ -231,7 +231,7 @@ check_security(Req) ->
 
 check_backpressure() ->
     Limit = application:get_env(
-        riak_admin_api, ws_backpressure_limit, 1000),
+        riak_admin_api, ws_backpressure_limit, 100),
     case process_info(self(), message_queue_len) of
         {message_queue_len, Len} when Len > Limit ->
             {backpressure, Len};

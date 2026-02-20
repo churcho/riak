@@ -44,7 +44,6 @@
 -define(SCOPE, riak_admin).
 -define(REGISTRY_KEY(Node), {api_node, Node}).
 -define(GROUP_NODES, api_nodes).
--define(GROUP_EVENTS, cluster_events).
 
 %%% ============================================================
 %%% API
@@ -97,17 +96,6 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -spec handle_info(term(), map()) -> {noreply, map()}.
-handle_info({cluster_event, Event}, State) ->
-    %% Forward cluster events to all group subscribers.
-    %% Failures here must not crash the coordinator.
-    try
-        {ok, _Count} = syn:publish(?SCOPE, ?GROUP_EVENTS, {event, node(), Event})
-    catch
-        _:PublishErr ->
-            logger:warning("[riak_admin] Failed to publish event: ~p",
-                           [PublishErr])
-    end,
-    {noreply, State};
 handle_info(Msg, State) ->
     logger:debug("[riak_admin] Coordinator got unexpected message: ~p",
                  [Msg]),
@@ -158,7 +146,6 @@ register_with_syn(Meta) ->
             ok = syn:register(?SCOPE, Key, self(), Meta)
     end,
     ok = syn:join(?SCOPE, ?GROUP_NODES, self(), Meta),
-    ok = syn:join(?SCOPE, ?GROUP_EVENTS, self()),
     ok.
 
 %% @private Build metadata map from application config and runtime info.
