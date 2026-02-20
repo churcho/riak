@@ -150,7 +150,7 @@ dispatch_action(#{<<"action">> := <<"subscribe">>,
             #{subscriptions := Current} = State,
             NewSubs = lists:usort(Current ++ Requested),
             State1 = State#{subscriptions := NewSubs,
-                            last_subscribe_ts => Now},
+                            last_subscribe_ts := Now},
             AckFrame = jsx:encode(#{type => <<"subscribed">>,
                                     topics => Requested}),
             %% Only send snapshots for topics that are genuinely new.
@@ -174,6 +174,18 @@ dispatch_action(#{<<"action">> := <<"unsubscribe">>,
 dispatch_action(#{<<"action">> := <<"ping">>}, State) ->
     Frame = jsx:encode(#{type => <<"pong">>,
                          timestamp => erlang:system_time(second)}),
+    {[{text, Frame}], State};
+
+dispatch_action(#{<<"action">> := <<"subscribe">>,
+                  <<"topics">> := _Topics}, State) ->
+    Frame = error_frame(<<"invalid_topics">>,
+                        <<"'topics' must be a JSON array of strings">>),
+    {[{text, Frame}], State};
+
+dispatch_action(#{<<"action">> := <<"unsubscribe">>,
+                  <<"topics">> := _Topics}, State) ->
+    Frame = error_frame(<<"invalid_topics">>,
+                        <<"'topics' must be a JSON array of strings">>),
     {[{text, Frame}], State};
 
 dispatch_action(#{<<"action">> := Action}, State)
@@ -417,6 +429,32 @@ dispatch_unknown_action_test_() ->
          ?assertEqual(<<"error">>, maps:get(<<"type">>, Decoded)),
          ?assertEqual(<<"unknown_action">>, maps:get(<<"code">>, Decoded))
      end}.
+
+dispatch_invalid_topics_test_() ->
+    {"subscribe/unsubscribe with non-array topics returns invalid_topics error", [
+        {"subscribe with string topics",
+         fun() ->
+             State = #{subscriptions => [], last_subscribe_ts => undefined},
+             Msg = #{<<"action">> => <<"subscribe">>,
+                     <<"topics">> => <<"ring">>},
+             {Frames, _} = dispatch_action(Msg, State),
+             {text, Json} = hd(Frames),
+             Decoded = jsx:decode(Json, [return_maps]),
+             ?assertEqual(<<"error">>, maps:get(<<"type">>, Decoded)),
+             ?assertEqual(<<"invalid_topics">>, maps:get(<<"code">>, Decoded))
+         end},
+        {"unsubscribe with string topics",
+         fun() ->
+             State = #{subscriptions => [<<"ring">>]},
+             Msg = #{<<"action">> => <<"unsubscribe">>,
+                     <<"topics">> => <<"ring">>},
+             {Frames, _} = dispatch_action(Msg, State),
+             {text, Json} = hd(Frames),
+             Decoded = jsx:decode(Json, [return_maps]),
+             ?assertEqual(<<"error">>, maps:get(<<"type">>, Decoded)),
+             ?assertEqual(<<"invalid_topics">>, maps:get(<<"code">>, Decoded))
+         end}
+    ]}.
 
 websocket_info_filters_by_subscription_test_() ->
     {"websocket_info forwards pre-encoded frames for subscribed topics", [

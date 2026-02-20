@@ -342,14 +342,13 @@ publish_event(Topic, Data) ->
             data => Data,
             timestamp => erlang:system_time(second)
         }),
-        case syn:local_publish(?SCOPE, ?GROUP_EVENTS,
-                               {event_frame, Topic, Frame}) of
-            {ok, _RecipientCount} ->
-                ok;
-            {error, Reason} ->
-                logger:warning("[riak_admin] Bridge publish ~s rejected: ~p",
-                               [Topic, Reason])
-        end
+        %% syn:local_publish/3 always returns {ok, Count} per its spec.
+        %% If the scope is uninitialized, it raises an exception caught
+        %% by the surrounding try/catch. The pattern match here is kept
+        %% simple since no error tuple is possible.
+        {ok, _RecipientCount} = syn:local_publish(
+            ?SCOPE, ?GROUP_EVENTS, {event_frame, Topic, Frame}),
+        ok
     catch
         _:CrashErr ->
             logger:warning("[riak_admin] Bridge failed to publish ~s: ~p",
