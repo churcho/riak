@@ -1,4 +1,15 @@
-%% @doc Shared Cowboy substrate handler and response helpers.
+%% @doc Cowboy HTTP handler for the Riak Admin API.
+%%
+%% Implements the cowboy_handler behaviour. Incoming requests pass through
+%% riak_admin_api_request for normalization and security enforcement, then
+%% dispatch to operation-specific handlers based on the `op' field of the
+%% normalized context. Each handler validates the HTTP method and delegates
+%% to the appropriate backend (object or bucket) for execution.
+%%
+%% Related modules:
+%%   riak_admin_api_request  — request normalization and security
+%%   riak_admin_api_response — response formatting and CORS
+%%   riak_admin_api_riak     — default backend implementations
 
 -module(riak_admin_api_handler).
 -behaviour(cowboy_handler).
@@ -6,6 +17,8 @@
 -export([init/2, json_reply/3, error_reply/4, ensure_get/1, ensure_admin_get/1,
          normalize_request/2]).
 
+%% @doc Cowboy handler entry point. Normalizes the request, checks security,
+%% and dispatches to the appropriate operation handler.
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, RouteOpts) ->
     Opts = request_opts(RouteOpts),
@@ -22,21 +35,20 @@ init(Req0, RouteOpts) ->
             {ok, Req2, RouteOpts}
     end.
 
+%% @doc Send a JSON response with standard headers and CORS.
 -spec json_reply(non_neg_integer(), jsx:json_term(), cowboy_req:req()) ->
     cowboy_req:req().
 json_reply(StatusCode, Data, Req) ->
     riak_admin_api_response:json_reply(StatusCode, Data, Req, req_response_opts(Req)).
 
+%% @doc Send an error response with standard headers and CORS.
 -spec error_reply(non_neg_integer(), binary(), term(), cowboy_req:req()) ->
     cowboy_req:req().
 error_reply(StatusCode, Error, Reason, Req) ->
     riak_admin_api_response:error_reply(
-        StatusCode,
-        Error,
-        Reason,
-        Req,
-        req_response_opts(Req)).
+        StatusCode, Error, Reason, Req, req_response_opts(Req)).
 
+%% @doc Ensure the request uses GET; returns 405 otherwise.
 -spec ensure_get(cowboy_req:req()) ->
     {ok, cowboy_req:req()} | {error, cowboy_req:req()}.
 ensure_get(Req) ->
@@ -48,7 +60,7 @@ ensure_get(Req) ->
             Req1 = riak_admin_api_response:error_reply(
                 405,
                 <<"method_not_allowed">>,
-                iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])),
+                <<"Unsupported HTTP method: ", Method/binary>>,
                 Req,
                 Opts),
             {error, Req1}
@@ -57,6 +69,10 @@ ensure_get(Req) ->
 %% @doc Method + security check for admin handlers (rah_* modules).
 %% Enforces GET-only, then runs the same TLS/authn/authz pipeline as the
 %% main handler so that admin endpoints respect security configuration.
+%%
+%% The security Context includes `route' and `op => admin' so that auth
+%% hooks can make endpoint-level authorization decisions (e.g., allow
+%% /api/ping but deny /api/cluster/status).
 -spec ensure_admin_get(cowboy_req:req()) ->
     {ok, cowboy_req:req()} | {error, cowboy_req:req()}.
 ensure_admin_get(Req) ->
@@ -67,23 +83,37 @@ ensure_admin_get(Req) ->
                 #{headers := H} when is_map(H) -> H;
                 _ -> #{}
             end,
-            Context = #{method => <<"GET">>, headers => Headers},
+            Route = admin_route(Req1),
+            {ok, HeaderMeta} = riak_admin_api_request:normalize_headers(Headers),
+            RequestId = maps:get(request_id, HeaderMeta),
+            NormHeaders = maps:remove(request_id, HeaderMeta),
+            Context = #{
+                method => <<"GET">>,
+                headers => NormHeaders,
+                route => Route,
+                op => admin
+            },
             case riak_admin_api_request:ensure_security(Context, Opts) of
                 ok ->
                     {ok, Req1};
                 {error, Error} ->
                     Req2 = riak_admin_api_response:reply_error_map(
-                        Error, Req1),
+                        Error#{request_id => RequestId}, Req1),
                     {error, Req2}
             end;
         Error ->
             Error
     end.
 
+%% @doc Delegate to riak_admin_api_request:normalize/2.
 -spec normalize_request(cowboy_req:req(), map()) ->
     {ok, map(), cowboy_req:req()} | {error, map(), cowboy_req:req()}.
 normalize_request(Req, Opts) ->
     riak_admin_api_request:normalize(Req, Opts).
+
+%%====================================================================
+%% Dispatch
+%%====================================================================
 
 dispatch(Context, Req, Opts, ReplyOpts) ->
     case maps:get(op, Context, undefined) of
@@ -120,148 +150,76 @@ dispatch(Context, Req, Opts, ReplyOpts) ->
                 ReplyOpts)
     end.
 
+%%====================================================================
+%% Operation handlers
+%%====================================================================
+
 handle_bucket_props(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     Input0 = base_backend_input(Context),
     case Method of
-        <<"GET">> ->
-            execute_bucket_backend(get_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
-        <<"HEAD">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(get_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
         <<"PUT">> ->
             with_props_body(
                 Req,
                 fun(Body, Props, Req1) ->
                     execute_bucket_backend(
-                        set_bucket_props,
-                        Context,
-                        Input0#{
-                            body => Body,
-                            props => Props
-                        },
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        set_bucket_props, Context,
+                        Input0#{body => Body, props => Props},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         <<"DELETE">> ->
             execute_bucket_backend(delete_bucket_props, Context, Input0, Req, Opts, ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"DELETE">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"DELETE">>], Req, ReplyOpts)
     end.
 
 handle_bucket_type_props(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     Input0 = base_backend_input(Context),
     case Method of
-        <<"GET">> ->
-            execute_bucket_backend(get_bucket_type_props, Context, Input0, Req, Opts, ReplyOpts);
-        <<"HEAD">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(get_bucket_type_props, Context, Input0, Req, Opts, ReplyOpts);
         <<"PUT">> ->
             with_props_body(
                 Req,
                 fun(Body, Props, Req1) ->
                     execute_bucket_backend(
-                        set_bucket_type_props,
-                        Context,
-                        Input0#{
-                            body => Body,
-                            props => Props
-                        },
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        set_bucket_type_props, Context,
+                        Input0#{body => Body, props => Props},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>, <<"PUT">>], Req, ReplyOpts)
     end.
 
 handle_bucket_listing(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     case Method of
-        <<"GET">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(
-                list_buckets,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
-        <<"HEAD">> ->
-            execute_bucket_backend(
-                list_buckets,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
+                list_buckets, Context, base_backend_input(Context),
+                Req, Opts, ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>], Req, ReplyOpts)
     end.
 
 handle_keys(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     case Method of
-        <<"GET">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(
-                list_keys,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
-        <<"HEAD">> ->
-            execute_bucket_backend(
-                list_keys,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
+                list_keys, Context, base_backend_input(Context),
+                Req, Opts, ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>], Req, ReplyOpts)
     end.
 
 handle_counter(Context, Req, Opts, ReplyOpts) ->
@@ -269,83 +227,43 @@ handle_counter(Context, Req, Opts, ReplyOpts) ->
     case Method of
         <<"GET">> ->
             execute_bucket_backend(
-                counter_get,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
+                counter_get, Context, base_backend_input(Context),
+                Req, Opts, ReplyOpts);
         <<"POST">> ->
             with_request_body(
                 Req,
                 fun(Body, Req1) ->
                     execute_bucket_backend(
-                        counter_update,
-                        Context,
+                        counter_update, Context,
                         (base_backend_input(Context))#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"POST">>], Req, ReplyOpts)
     end.
 
 handle_crdt_item(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     case Method of
-        <<"GET">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(
-                crdt_fetch,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
-        <<"HEAD">> ->
-            execute_bucket_backend(
-                crdt_fetch,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
+                crdt_fetch, Context, base_backend_input(Context),
+                Req, Opts, ReplyOpts);
         <<"POST">> ->
             with_request_body(
                 Req,
                 fun(Body, Req1) ->
                     execute_bucket_backend(
-                        crdt_update,
-                        Context,
+                        crdt_update, Context,
                         (base_backend_input(Context))#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>, <<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>, <<"POST">>], Req, ReplyOpts)
     end.
 
 handle_crdt_collection(Context, Req, Opts, ReplyOpts) ->
@@ -356,59 +274,25 @@ handle_crdt_collection(Context, Req, Opts, ReplyOpts) ->
                 Req,
                 fun(Body, Req1) ->
                     execute_bucket_backend(
-                        crdt_create,
-                        Context,
+                        crdt_create, Context,
                         (base_backend_input(Context))#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method, [<<"POST">>], Req, ReplyOpts)
     end.
 
 handle_index_query(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     case Method of
-        <<"GET">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_bucket_backend(
-                index_query,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
-        <<"HEAD">> ->
-            execute_bucket_backend(
-                index_query,
-                Context,
-                base_backend_input(Context),
-                Req,
-                Opts,
-                ReplyOpts);
+                index_query, Context, base_backend_input(Context),
+                Req, Opts, ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>], Req, ReplyOpts)
     end.
 
 handle_query(Context, Req, Opts, ReplyOpts) ->
@@ -419,91 +303,47 @@ handle_query(Context, Req, Opts, ReplyOpts) ->
                 Req,
                 fun(Body, JsonBody, Req1) ->
                     execute_bucket_backend(
-                        query,
-                        Context,
+                        query, Context,
                         (base_backend_input(Context))#{
-                            body => Body,
-                            json => JsonBody
-                        },
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                            body => Body, json => JsonBody},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method, [<<"POST">>], Req, ReplyOpts)
     end.
 
 handle_mapred(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     case Method of
-        <<"GET">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             reply_object(
-                Context,
-                Req,
-                #{
-                    status => 200,
-                    body => mapred_usage(),
-                    content_type => <<"text/plain; charset=utf-8">>
-                },
-                ReplyOpts);
-        <<"HEAD">> ->
-            reply_object(
-                Context,
-                Req,
-                #{
-                    status => 200,
-                    body => mapred_usage(),
-                    content_type => <<"text/plain; charset=utf-8">>
-                },
+                Context, Req,
+                #{status => 200,
+                  body => mapred_usage(),
+                  content_type => <<"text/plain; charset=utf-8">>},
                 ReplyOpts);
         <<"POST">> ->
             with_json_body(
                 Req,
                 fun(Body, JsonBody, Req1) ->
                     execute_bucket_backend(
-                        mapred,
-                        Context,
+                        mapred, Context,
                         (base_backend_input(Context))#{
-                            body => Body,
-                            json => JsonBody
-                        },
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                            body => Body, json => JsonBody},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>, <<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>, <<"POST">>], Req, ReplyOpts)
     end.
 
 handle_object_item(Context, Req, Opts, ReplyOpts) ->
     Method = maps:get(method, Context, <<"GET">>),
     Input0 = base_backend_input(Context),
     case Method of
-        <<"GET">> ->
-            execute_backend(get, Context, Input0, Req, Opts, ReplyOpts);
-        <<"HEAD">> ->
+        M when M =:= <<"GET">>; M =:= <<"HEAD">> ->
             execute_backend(get, Context, Input0, Req, Opts, ReplyOpts);
         <<"DELETE">> ->
             execute_backend(delete, Context, Input0, Req, Opts, ReplyOpts);
@@ -512,12 +352,8 @@ handle_object_item(Context, Req, Opts, ReplyOpts) ->
                 Req,
                 fun(Body, Req1) ->
                     execute_backend(
-                        put,
-                        Context,
-                        Input0#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        put, Context, Input0#{body => Body},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         <<"POST">> ->
@@ -525,26 +361,14 @@ handle_object_item(Context, Req, Opts, ReplyOpts) ->
                 Req,
                 fun(Body, Req1) ->
                     execute_backend(
-                        post,
-                        Context,
-                        Input0#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        post, Context, Input0#{body => Body},
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method,
+                [<<"GET">>, <<"HEAD">>, <<"PUT">>, <<"POST">>, <<"DELETE">>],
+                Req, ReplyOpts)
     end.
 
 handle_object_collection(Context, Req, Opts, ReplyOpts) ->
@@ -555,65 +379,33 @@ handle_object_collection(Context, Req, Opts, ReplyOpts) ->
                 Req,
                 fun(Body, Req1) ->
                     execute_backend(
-                        create,
-                        Context,
+                        create, Context,
                         (base_backend_input(Context))#{body => Body},
-                        Req1,
-                        Opts,
-                        ReplyOpts)
+                        Req1, Opts, ReplyOpts)
                 end,
                 ReplyOpts);
         _ ->
-            riak_admin_api_response:reply_error_map(
-                with_request_id(
-                    #{
-                        status => 405,
-                        code => <<"method_not_allowed">>,
-                        reason => iolist_to_binary(
-                            io_lib:format("Unsupported HTTP method: ~p", [Method])),
-                        allow => [<<"POST">>]
-                    },
-                    ReplyOpts),
-                Req)
+            reply_method_not_allowed(Method, [<<"POST">>], Req, ReplyOpts)
     end.
 
+%%====================================================================
+%% Backend execution
+%%====================================================================
+
 execute_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
-    Backend = object_backend(Opts),
-    case run_backend(Backend, Action, Context, Input) of
+    Backend = resolve_backend(object_backend,
+        fun riak_admin_api_riak:object_operation/3, Opts),
+    case run_backend(object, Backend, Action, Context, Input) of
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
-        {error, Error} when is_map(Error) ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(Error, Context, ReplyOpts),
-                Req);
-        {error, Reason} ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(
-                    #{
-                        status => 500,
-                        code => <<"backend_error">>,
-                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
-                    },
-                    Context,
-                    ReplyOpts),
-                Req);
-        Other ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(
-                    #{
-                        status => 500,
-                        code => <<"backend_error">>,
-                        reason => iolist_to_binary(io_lib:format(
-                            "Unexpected backend reply: ~p", [Other]))
-                    },
-                    Context,
-                    ReplyOpts),
-                Req)
+        Result ->
+            reply_backend_error(Result, Context, Req, ReplyOpts)
     end.
 
 execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
-    Backend = bucket_backend(Opts),
-    case run_bucket_backend(Backend, Action, Context, Input) of
+    Backend = resolve_backend(bucket_backend,
+        fun riak_admin_api_riak:bucket_operation/3, Opts),
+    case run_backend(bucket, Backend, Action, Context, Input) of
         {ok, Reply} when is_map(Reply) ->
             reply_object(Context, Req, Reply, ReplyOpts);
         {stream, StreamInit, ChunkFun} ->
@@ -628,40 +420,58 @@ execute_bucket_backend(Action, Context, Input, Req, Opts, ReplyOpts) ->
                 _ ->
                     reply_stream(Context, Req, StreamInit, ChunkFun, ReplyOpts)
             end;
-        {error, Error} when is_map(Error) ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(Error, Context, ReplyOpts),
-                Req);
-        {error, Reason} ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(
-                    #{
-                        status => 500,
-                        code => <<"backend_error">>,
-                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
-                    },
-                    Context,
-                    ReplyOpts),
-                Req);
-        Other ->
-            riak_admin_api_response:reply_error_map(
-                with_error_context(
-                    #{
-                        status => 500,
-                        code => <<"backend_error">>,
-                        reason => iolist_to_binary(io_lib:format(
-                            "Unexpected backend reply: ~p", [Other]))
-                    },
-                    Context,
-                    ReplyOpts),
-                Req)
+        Result ->
+            reply_backend_error(Result, Context, Req, ReplyOpts)
     end.
+
+resolve_backend(Key, Default, Opts) ->
+    case maps:get(Key, Opts, undefined) of
+        Backend when is_function(Backend, 3) -> Backend;
+        _ -> Default
+    end.
+
+run_backend(Label, Backend, Action, Context, Input) ->
+    try Backend(Action, Context, Input)
+    catch
+        Class:Reason:Stack ->
+            logger:error(
+                "[riak_admin] ~s backend crashed (~p): ~p:~p~n~p",
+                [Label, Action, Class, Reason, Stack]),
+            {error, #{
+                status => 500,
+                code => <<"backend_error">>,
+                reason => <<"Internal server error">>
+            }}
+    end.
+
+reply_backend_error({error, Error}, Context, Req, ReplyOpts) when is_map(Error) ->
+    riak_admin_api_response:reply_error_map(
+        with_error_context(Error, Context, ReplyOpts), Req);
+reply_backend_error({error, Reason}, Context, Req, ReplyOpts) ->
+    logger:warning("[riak_admin] non-map backend error: ~p", [Reason]),
+    riak_admin_api_response:reply_error_map(
+        with_error_context(
+            #{status => 500,
+              code => <<"backend_error">>,
+              reason => <<"Internal server error">>},
+            Context, ReplyOpts), Req);
+reply_backend_error(Other, Context, Req, ReplyOpts) ->
+    logger:warning("[riak_admin] unexpected backend reply: ~p", [Other]),
+    riak_admin_api_response:reply_error_map(
+        with_error_context(
+            #{status => 500,
+              code => <<"backend_error">>,
+              reason => <<"Internal server error">>},
+            Context, ReplyOpts), Req).
+
+%%====================================================================
+%% Response helpers
+%%====================================================================
 
 %% S2 (CG-001): Handle streaming responses from the backend.
 %% The backend returns {stream, StreamInit, ChunkFun} where:
 %%   - StreamInit is a map with status, content_type, and optional headers
 %%   - ChunkFun is fun(EmitFun) -> ok, where EmitFun is fun(Data, fin|nofin)
-%% The handler starts a Cowboy streaming response and provides the emitter.
 reply_stream(_Context, Req, StreamInit, ChunkFun, BaseReplyOpts) ->
     Status = maps:get(status, StreamInit, 200),
     ReplyOpts = maps:merge(BaseReplyOpts, maps:get(reply_opts, StreamInit, #{})),
@@ -683,8 +493,7 @@ reply_stream(_Context, Req, StreamInit, ChunkFun, BaseReplyOpts) ->
                 [Class, Reason, Stack]),
             ErrorJson = jsx:encode(#{
                 error => <<"stream_error">>,
-                reason => iolist_to_binary(
-                    io_lib:format("~p:~p", [Class, Reason]))
+                reason => <<"Internal server error">>
             }),
             catch riak_admin_api_response:stream_reply_body(
                 ErrorJson, fin, Req1),
@@ -704,33 +513,41 @@ reply_object(Context, Req, Reply, BaseReplyOpts) ->
         maps:get(headers, Reply, #{})),
     riak_admin_api_response:raw_reply(Status, Body, Req, ReplyOpts, Headers0).
 
+reply_method_not_allowed(Method, Allowed, Req, ReplyOpts) ->
+    riak_admin_api_response:reply_error_map(
+        with_request_id(
+            #{status => 405,
+              code => <<"method_not_allowed">>,
+              reason => <<"Unsupported HTTP method: ", Method/binary>>,
+              allow => Allowed},
+            ReplyOpts),
+        Req).
+
+%%====================================================================
+%% Request body reading
+%%====================================================================
+
 with_request_body(Req, HandlerFun, ReplyOpts) ->
     case read_request_body(Req) of
         {ok, Body, Req1} ->
             HandlerFun(Body, Req1);
         {error, body_too_large, Req1} ->
-            MaxBody = application:get_env(riak_admin_api,
-                                           max_request_body_bytes,
-                                           5 * 1024 * 1024),
             riak_admin_api_response:reply_error_map(
                 with_request_id(
-                    #{
-                        status => 413,
-                        code => <<"payload_too_large">>,
-                        reason => iolist_to_binary(io_lib:format(
-                            "Request body exceeds maximum allowed size (~B bytes)",
-                            [MaxBody]))
-                    },
+                    #{status => 413,
+                      code => <<"payload_too_large">>,
+                      reason => iolist_to_binary(io_lib:format(
+                          "Request body exceeds maximum allowed size (~B bytes)",
+                          [max_body_bytes()]))},
                     ReplyOpts),
                 Req1);
         {error, Reason, Req1} ->
+            logger:warning("[riak_admin] body read error: ~p", [Reason]),
             riak_admin_api_response:reply_error_map(
                 with_request_id(
-                    #{
-                        status => 400,
-                        code => <<"invalid_body">>,
-                        reason => iolist_to_binary(io_lib:format("~p", [Reason]))
-                    },
+                    #{status => 400,
+                      code => <<"invalid_body">>,
+                      reason => <<"Failed to read request body">>},
                     ReplyOpts),
                 Req1)
     end.
@@ -745,11 +562,9 @@ with_props_body(Req, HandlerFun, ReplyOpts) ->
                 {error, Reason} ->
                     riak_admin_api_response:reply_error_map(
                         with_request_id(
-                            #{
-                                status => 400,
-                                code => <<"invalid_body">>,
-                                reason => Reason
-                            },
+                            #{status => 400,
+                              code => <<"invalid_body">>,
+                              reason => Reason},
                             ReplyOpts),
                         Req1)
             end
@@ -766,11 +581,9 @@ with_json_body(Req, HandlerFun, ReplyOpts) ->
                 {error, Reason} ->
                     riak_admin_api_response:reply_error_map(
                         with_request_id(
-                            #{
-                                status => 400,
-                                code => <<"invalid_body">>,
-                                reason => Reason
-                            },
+                            #{status => 400,
+                              code => <<"invalid_body">>,
+                              reason => Reason},
                             ReplyOpts),
                         Req1)
             end
@@ -801,38 +614,32 @@ decode_json_object(Body) ->
             {error, <<"Body must be a JSON object">>}
     end.
 
-%% S5 (M-6): Body size enforcement consistency.
-%% The #{body := Body} fast path (used in tests and for pre-read bodies)
-%% now enforces the same max_request_body_bytes limit as the chunked
-%% Cowboy read path. This prevents accidental bypass of body size limits
-%% when a body value is injected into the request map.
+%% Body size enforcement: the #{body := Body} fast path (used in tests and
+%% for pre-read bodies) enforces the same max_request_body_bytes limit as
+%% the chunked Cowboy read path.
 read_request_body(Req = #{body := undefined}) ->
     {ok, <<>>, Req};
 read_request_body(Req = #{body := Body}) when is_binary(Body) ->
-    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
-                                   5 * 1024 * 1024),
-    case byte_size(Body) > MaxBody of
-        true -> {error, body_too_large, Req};
-        false -> {ok, Body, Req}
-    end;
+    check_body_size(Body, Req);
 read_request_body(Req = #{body := Body}) when is_list(Body) ->
-    Bin = iolist_to_binary(Body),
-    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
-                                   5 * 1024 * 1024),
-    case byte_size(Bin) > MaxBody of
-        true -> {error, body_too_large, Req};
-        false -> {ok, Bin, Req}
-    end;
+    check_body_size(iolist_to_binary(Body), Req);
 read_request_body(Req0) ->
-    MaxBody = application:get_env(riak_admin_api, max_request_body_bytes,
-                                   5 * 1024 * 1024), %% 5 MiB default
-    try read_request_body_chunks(Req0, [], 0, MaxBody)
+    try read_request_body_chunks(Req0, [], 0, max_body_bytes())
     catch
         throw:{body_too_large, ReqFinal} ->
             {error, body_too_large, ReqFinal};
         Class:Reason ->
             {error, {Class, Reason}, Req0}
     end.
+
+check_body_size(Body, Req) ->
+    case byte_size(Body) > max_body_bytes() of
+        true -> {error, body_too_large, Req};
+        false -> {ok, Body, Req}
+    end.
+
+max_body_bytes() ->
+    application:get_env(riak_admin_api, max_request_body_bytes, 5 * 1024 * 1024).
 
 read_request_body_chunks(Req0, Acc, AccSize, MaxBody) ->
     case cowboy_req:read_body(Req0) of
@@ -850,6 +657,10 @@ read_request_body_chunks(Req0, Acc, AccSize, MaxBody) ->
             end
     end.
 
+%%====================================================================
+%% Internal helpers
+%%====================================================================
+
 base_backend_input(Context) ->
     #{
         method => maps:get(method, Context, <<"GET">>),
@@ -857,50 +668,6 @@ base_backend_input(Context) ->
         headers => maps:get(headers, Context, #{}),
         route => maps:get(route, Context, <<"">>)
     }.
-
-object_backend(Opts) ->
-    case maps:get(object_backend, Opts, undefined) of
-        Backend when is_function(Backend, 3) ->
-            Backend;
-        _ ->
-            fun riak_admin_api_riak:object_operation/3
-    end.
-
-bucket_backend(Opts) ->
-    case maps:get(bucket_backend, Opts, undefined) of
-        Backend when is_function(Backend, 3) ->
-            Backend;
-        _ ->
-            fun riak_admin_api_riak:bucket_operation/3
-    end.
-
-run_backend(Backend, Action, Context, Input) ->
-    try Backend(Action, Context, Input)
-    catch
-        Class:Reason:Stack ->
-            logger:error(
-                "[riak_admin] object backend crashed (~p): ~p:~p~n~p",
-                [Action, Class, Reason, Stack]),
-            {error, #{
-                status => 500,
-                code => <<"backend_error">>,
-                reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
-            }}
-    end.
-
-run_bucket_backend(Backend, Action, Context, Input) ->
-    try Backend(Action, Context, Input)
-    catch
-        Class:Reason:Stack ->
-            logger:error(
-                "[riak_admin] bucket backend crashed (~p): ~p:~p~n~p",
-                [Action, Class, Reason, Stack]),
-            {error, #{
-                status => 500,
-                code => <<"backend_error">>,
-                reason => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
-            }}
-    end.
 
 maybe_put_content_type(undefined, Headers) ->
     Headers;
@@ -939,46 +706,18 @@ request_opts(RouteOpts) ->
         M when is_map(M) -> M;
         _ -> #{}
     end,
-    DefaultRequireTLS = application:get_env(riak_admin_api, security_require_tls, false),
-    DefaultTrustProxyHeaders = application:get_env(
-        riak_admin_api,
-        security_trust_proxy_headers,
-        false),
-    DefaultTrustedOrigins = application:get_env(
-        riak_admin_api,
-        security_trusted_origins,
-        []),
-    DefaultCutoverMode = application:get_env(
-        riak_admin_api,
-        cowboy_cutover_default_mode,
-        disabled),
-    DefaultCutoverOpModes = application:get_env(
-        riak_admin_api,
-        cowboy_cutover_op_modes,
-        []),
-    %% S1: Add require_auth passthrough for auth guardrails
-    DefaultRequireAuth = application:get_env(
-        riak_admin_api,
-        security_require_auth,
-        false),
-    RouteMap#{
-        require_tls => maps:get(require_tls, RouteMap, DefaultRequireTLS),
-        trust_proxy_headers => maps:get(trust_proxy_headers, RouteMap, DefaultTrustProxyHeaders),
-        trusted_origins => maps:get(trusted_origins, RouteMap, DefaultTrustedOrigins),
-        require_auth => maps:get(require_auth, RouteMap, DefaultRequireAuth),
-        authn_fun => maps:get(authn_fun, RouteMap,
-            application:get_env(riak_admin_api, authn_hook, undefined)),
-        authz_fun => maps:get(authz_fun, RouteMap,
-            application:get_env(riak_admin_api, authz_hook, undefined)),
-        cutover_default_mode => maps:get(
-            cutover_default_mode,
-            RouteMap,
-            DefaultCutoverMode),
-        cutover_op_modes => maps:get(
-            cutover_op_modes,
-            RouteMap,
-            DefaultCutoverOpModes)
-    }.
+    %% S1: require_auth passthrough for auth guardrails
+    Defaults = #{
+        require_tls => application:get_env(riak_admin_api, security_require_tls, false),
+        trust_proxy_headers => application:get_env(riak_admin_api, security_trust_proxy_headers, false),
+        trusted_origins => application:get_env(riak_admin_api, security_trusted_origins, []),
+        require_auth => application:get_env(riak_admin_api, security_require_auth, false),
+        authn_fun => application:get_env(riak_admin_api, authn_hook, undefined),
+        authz_fun => application:get_env(riak_admin_api, authz_hook, undefined),
+        cutover_default_mode => application:get_env(riak_admin_api, cowboy_cutover_default_mode, disabled),
+        cutover_op_modes => application:get_env(riak_admin_api, cowboy_cutover_op_modes, [])
+    },
+    maps:merge(Defaults, RouteMap).
 
 req_response_opts(Req) ->
     Headers = case Req of
@@ -1005,6 +744,15 @@ response_opts(Context, Extra) ->
 
 request_method(#{method := Method}) when is_binary(Method) -> Method;
 request_method(Req) -> cowboy_req:method(Req).
+
+%% @doc Extract the request path from a Cowboy request for admin handlers.
+%% Used by ensure_admin_get to include route information in the security
+%% context so auth hooks can make endpoint-level decisions.
+admin_route(#{path := Path}) when is_binary(Path) -> Path;
+admin_route(Req) ->
+    try cowboy_req:path(Req)
+    catch _:_ -> <<"unknown">>
+    end.
 
 mapred_usage() ->
     <<"This resource accepts POSTs with bodies containing JSON of the form:\n"

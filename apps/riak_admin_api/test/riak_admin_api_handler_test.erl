@@ -146,17 +146,14 @@ json_reply_fallback_on_encode_error_test() ->
 
     Decoded = jsx:decode(Body, [return_maps]),
     ?assertEqual(<<"json_encoding_error">>, maps:get(<<"error">>, Decoded)),
-    ?assertEqual(<<"{error,badarg}">>, maps:get(<<"reason">>, Decoded)).
+    ?assertEqual(<<"Response encoding failed">>, maps:get(<<"reason">>, Decoded)).
 
 %%% ============================================================
 %%% S0: Request body size limit enforcement
 %%% ============================================================
 
 body_size_limit_rejects_oversized_body_test() ->
-    %% Set a very small limit for testing.
-    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
-    application:set_env(riak_admin_api, max_request_body_bytes, 64),
-    try
+    riak_admin_api_test_helpers:with_app_env(max_request_body_bytes, 64, fun() ->
         OversizedBody = binary:copy(<<"x">>, 128),
         StreamID = {body_limit_test, make_ref()},
         Req0 = #{
@@ -174,19 +171,12 @@ body_size_limit_rejects_oversized_body_test() ->
             end
         },
         {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
-        ok
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
-            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
-        end
-    end.
+        {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
+        ?assertEqual(413, Status)
+    end).
 
 body_size_limit_allows_within_limit_body_test() ->
-    %% Ensure bodies within the limit pass through.
-    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
-    application:set_env(riak_admin_api, max_request_body_bytes, 1024),
-    try
+    riak_admin_api_test_helpers:with_app_env(max_request_body_bytes, 1024, fun() ->
         SmallBody = <<"small payload">>,
         StreamID = {body_ok_test, make_ref()},
         Req0 = #{
@@ -200,7 +190,6 @@ body_size_limit_allows_within_limit_body_test() ->
         Opts = #{
             cutover_default_mode => enabled,
             object_backend => fun(put, _Ctx, Input) ->
-                %% Verify the body was passed through.
                 ?assertEqual(SmallBody, maps:get(body, Input)),
                 {ok, #{status => 204, body => <<>>}}
             end
@@ -208,12 +197,7 @@ body_size_limit_allows_within_limit_body_test() ->
         {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
         {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
         ?assertEqual(204, Status)
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
-            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% S1: require_auth passthrough in handler init
@@ -273,17 +257,24 @@ handler_init_with_require_auth_and_hooks_passes_through_test() ->
 handler_stream_dispatch_sends_chunked_response_test() ->
     %% When the bucket_backend returns {stream, StreamInit, ChunkFun},
     %% the handler should use stream_reply_init + stream_reply_body.
+    %%
+    %% cowboy_req:stream_body/3 sends data to the connection process
+    %% (identified by the `pid` key in the req map) and blocks waiting
+    %% for a {data_ack, ConnPid} reply. We must spawn a helper process
+    %% to act as the connection process, otherwise the test deadlocks.
     StreamID = {stream_dispatch_test, make_ref()},
+    Parent = self(),
+    ConnPid = spawn_link(fun() -> stream_conn_loop(Parent) end),
     Req0 = #{
         method => <<"GET">>,
         path => <<"/buckets/mybucket/keys">>,
         headers => #{<<"x-request-id">> => <<"rid-stream">>},
-        pid => self(),
+        pid => ConnPid,
         streamid => StreamID
     },
     RouteOpts = #{
         cutover_default_mode => enabled,
-        bucket_backend => fun(keys, _Ctx, _Input) ->
+        bucket_backend => fun(list_keys, _Ctx, _Input) ->
             StreamInit = #{
                 status => 200,
                 content_type => <<"application/json; charset=utf-8">>
@@ -297,15 +288,15 @@ handler_stream_dispatch_sends_chunked_response_test() ->
         end
     },
     {ok, _Req, _State} = riak_admin_api_handler:init(Req0, RouteOpts),
-    %% Stream responses use stream_reply which sends headers first,
-    %% then body chunks. The mock Req captures the initial stream_reply.
-    Pid = self(),
+    %% The helper collects the stream headers and all body chunks,
+    %% then sends the assembled result back to us.
     receive
-        {{Pid, StreamID}, {headers, 200, _Headers}} ->
-            ok
-    after 500 ->
-        %% If stream_reply sends a regular response, capture that
-        ok
+        {stream_complete, Status, Chunks} ->
+            ?assertEqual(200, Status),
+            Body = iolist_to_binary(Chunks),
+            ?assertEqual(<<"{\"keys\":[\"k1\",\"k2\"]}">>, Body)
+    after 2000 ->
+        ?assert(false)
     end.
 
 %%% ============================================================
@@ -392,11 +383,7 @@ cors_headers_not_emitted_when_origin_mismatch_test() ->
 %%% ============================================================
 
 body_size_limit_enforced_on_preread_body_test() ->
-    %% When body is pre-populated in the request map, the size limit
-    %% should still be enforced (S5 fix for the #{body := Body} bypass).
-    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
-    application:set_env(riak_admin_api, max_request_body_bytes, 100),
-    try
+    riak_admin_api_test_helpers:with_app_env(max_request_body_bytes, 100, fun() ->
         StreamID = {body_preread_size_test, make_ref()},
         LargeBody = binary:copy(<<"X">>, 200),
         Req0 = #{
@@ -416,17 +403,10 @@ body_size_limit_enforced_on_preread_body_test() ->
         {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
         {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
         ?assertEqual(413, Status)
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
-            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
-        end
-    end.
+    end).
 
 body_size_limit_allows_preread_body_within_limit_test() ->
-    OldVal = application:get_env(riak_admin_api, max_request_body_bytes),
-    application:set_env(riak_admin_api, max_request_body_bytes, 1000),
-    try
+    riak_admin_api_test_helpers:with_app_env(max_request_body_bytes, 1000, fun() ->
         StreamID = {body_preread_ok_test, make_ref()},
         SmallBody = <<"{\"key\":\"value\"}">>,
         Req0 = #{
@@ -447,25 +427,37 @@ body_size_limit_allows_preread_body_within_limit_test() ->
         {ok, _Req, _State} = riak_admin_api_handler:init(Req0, Opts),
         {Status, _Headers, _Body} = receive_response_for_stream(StreamID),
         ?assertEqual(204, Status)
-    after
-        case OldVal of
-            undefined -> application:unset_env(riak_admin_api, max_request_body_bytes);
-            {ok, V} -> application:set_env(riak_admin_api, max_request_body_bytes, V)
-        end
-    end.
+    end).
 
 %%% ============================================================
 %%% Helpers
 %%% ============================================================
 
 expected_method_not_allowed_reason(Method) ->
-    iolist_to_binary(io_lib:format("Unsupported HTTP method: ~p", [Method])).
+    <<"Unsupported HTTP method: ", Method/binary>>.
+
+%% @doc Helper process that acts as a Cowboy connection handler for
+%% stream dispatch tests. cowboy_req:stream_body/3 sends data to
+%% the connection process (Req's `pid') and blocks until it receives
+%% {data_ack, ConnPid}. This helper receives those messages, sends
+%% the acks, collects all chunks, and forwards the result to Parent.
+stream_conn_loop(Parent) ->
+    stream_conn_recv(Parent, undefined, []).
+
+stream_conn_recv(Parent, Status, Chunks) ->
+    Me = self(),
+    receive
+        {{Me, _StreamID}, {headers, S, _Headers}} ->
+            stream_conn_recv(Parent, S, Chunks);
+        {{Me, _StreamID}, {data, HandlerPid, nofin, Data}} ->
+            HandlerPid ! {data_ack, Me},
+            stream_conn_recv(Parent, Status, Chunks ++ [Data]);
+        {{Me, _StreamID}, {data, HandlerPid, fin, Data}} ->
+            HandlerPid ! {data_ack, Me},
+            Parent ! {stream_complete, Status, Chunks ++ [Data]}
+    after 5000 ->
+        Parent ! {stream_error, timeout}
+    end.
 
 receive_response_for_stream(StreamID) ->
-    Pid = self(),
-    receive
-        {{Pid, StreamID}, {response, Status, Headers, Body}} ->
-            {Status, Headers, Body}
-    after 500 ->
-        ?assert(false)
-    end.
+    riak_admin_api_test_helpers:receive_response_for_stream(StreamID).
