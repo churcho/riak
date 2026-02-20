@@ -790,6 +790,7 @@ select_doc(Obj, undefined) ->
     case riak_object:get_update_value(Obj) of
         undefined ->
             case riak_object:get_contents(Obj) of
+                [] -> notfound;
                 [Single] -> {ok, Single};
                 Multi when is_list(Multi) -> {siblings, Multi}
             end;
@@ -1040,7 +1041,8 @@ object_error_map(Reason) ->
     #{status => 500, code => <<"backend_error">>, reason => to_bin(Reason)}.
 
 bucket_props_ref(Context) ->
-    {maps:get(bucket_type, Context, <<"default">>), maps:get(bucket, Context, undefined)}.
+    maybe_bucket_type_ref(maps:get(bucket_type, Context, <<"default">>),
+        maps:get(bucket, Context, undefined)).
 
 json_backend_reply(Status, Body) ->
     #{
@@ -2689,16 +2691,18 @@ parallel_ping_nodes(Nodes, PingTimeout) ->
     Ref = make_ref(),
     Pids = lists:map(
         fun(Node) ->
-            spawn_link(fun() ->
+            {Pid, _Mon} = spawn_monitor(fun() ->
                 Result = (net_adm:ping(Node) =:= pong),
                 Parent ! {Ref, Node, Result}
-            end)
+            end),
+            Pid
         end, Nodes),
     Results = collect_ping_results(Ref, length(Nodes), PingTimeout, #{}),
-    %% Unlink spawned processes to avoid late EXIT messages
+    %% Kill timed-out processes and flush their DOWN messages
     lists:foreach(fun(Pid) ->
-        unlink(Pid)
+        exit(Pid, kill)
     end, Pids),
+    flush_ping_monitors(Ref, Pids),
     Results.
 
 collect_ping_results(_Ref, 0, _Timeout, Acc) ->
@@ -2711,6 +2715,18 @@ collect_ping_results(Ref, Remaining, Timeout, Acc) ->
     after Timeout ->
         %% Remaining nodes are unreachable (timed out)
         Acc
+    end.
+
+flush_ping_monitors(_Ref, []) ->
+    ok;
+flush_ping_monitors(Ref, Pids) ->
+    receive
+        {Ref, _Node, _Result} ->
+            flush_ping_monitors(Ref, Pids);
+        {'DOWN', _Mon, process, Pid, _Reason} ->
+            flush_ping_monitors(Ref, lists:delete(Pid, Pids))
+    after 0 ->
+        ok
     end.
 
 %%% ============================================================

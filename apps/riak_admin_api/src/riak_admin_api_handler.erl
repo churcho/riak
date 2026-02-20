@@ -3,7 +3,8 @@
 -module(riak_admin_api_handler).
 -behaviour(cowboy_handler).
 
--export([init/2, json_reply/3, error_reply/4, ensure_get/1, normalize_request/2]).
+-export([init/2, json_reply/3, error_reply/4, ensure_get/1, ensure_admin_get/1,
+         normalize_request/2]).
 
 -spec init(cowboy_req:req(), term()) -> {ok, cowboy_req:req(), term()}.
 init(Req0, RouteOpts) ->
@@ -48,6 +49,32 @@ ensure_get(Req) ->
                 Req,
                 Opts),
             {error, Req1}
+    end.
+
+%% @doc Method + security check for admin handlers (rah_* modules).
+%% Enforces GET-only, then runs the same TLS/authn/authz pipeline as the
+%% main handler so that admin endpoints respect security configuration.
+-spec ensure_admin_get(cowboy_req:req()) ->
+    {ok, cowboy_req:req()} | {error, cowboy_req:req()}.
+ensure_admin_get(Req) ->
+    case ensure_get(Req) of
+        {ok, Req1} ->
+            Opts = request_opts(#{}),
+            Headers = case Req1 of
+                #{headers := H} when is_map(H) -> H;
+                _ -> #{}
+            end,
+            Context = #{method => <<"GET">>, headers => Headers},
+            case riak_admin_api_request:ensure_security(Context, Opts) of
+                ok ->
+                    {ok, Req1};
+                {error, Error} ->
+                    Req2 = riak_admin_api_response:reply_error_map(
+                        Error, Req1),
+                    {error, Req2}
+            end;
+        Error ->
+            Error
     end.
 
 -spec normalize_request(cowboy_req:req(), map()) ->
@@ -782,8 +809,8 @@ read_request_body(Req0) ->
                                    5 * 1024 * 1024), %% 5 MiB default
     try read_request_body_chunks(Req0, [], 0, MaxBody)
     catch
-        throw:body_too_large ->
-            {error, body_too_large, Req0};
+        throw:{body_too_large, ReqFinal} ->
+            {error, body_too_large, ReqFinal};
         Class:Reason ->
             {error, {Class, Reason}, Req0}
     end.
@@ -793,13 +820,13 @@ read_request_body_chunks(Req0, Acc, AccSize, MaxBody) ->
         {ok, Body, Req1} ->
             NewSize = AccSize + byte_size(Body),
             case NewSize > MaxBody of
-                true -> throw(body_too_large);
+                true -> throw({body_too_large, Req1});
                 false -> {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req1}
             end;
         {more, Body, Req1} ->
             NewSize = AccSize + byte_size(Body),
             case NewSize > MaxBody of
-                true -> throw(body_too_large);
+                true -> throw({body_too_large, Req1});
                 false -> read_request_body_chunks(Req1, [Body | Acc], NewSize, MaxBody)
             end
     end.
@@ -905,7 +932,7 @@ request_opts(RouteOpts) ->
     DefaultCutoverMode = application:get_env(
         riak_admin_api,
         cowboy_cutover_default_mode,
-        enabled),
+        disabled),
     DefaultCutoverOpModes = application:get_env(
         riak_admin_api,
         cowboy_cutover_op_modes,
