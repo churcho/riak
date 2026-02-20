@@ -295,13 +295,7 @@ route_opts(Opts) ->
     Opts#{cutover_default_mode => enabled}.
 
 receive_response_for_stream(StreamID) ->
-    Pid = self(),
-    receive
-        {{Pid, StreamID}, {response, Status, Headers, Body}} ->
-            {Status, Headers, Body}
-    after 500 ->
-        ?assert(false)
-    end.
+    riak_admin_api_test_helpers:receive_response_for_stream(StreamID).
 
 valid_query_body() ->
     <<"{\"query_list\":[{\"index_name\":\"email_bin\",\"start_term\":\"a\",\"end_term\":\"z\"}]}">>.
