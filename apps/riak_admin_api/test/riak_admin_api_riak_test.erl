@@ -237,6 +237,20 @@ conditional_put_options_accepts_if_unmodified_since_test() ->
     {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
     ?assert(lists:keymember(if_unmodified_since, 1, Options)).
 
+conditional_put_options_ignores_empty_if_none_match_test() ->
+    Headers = #{<<"if-none-match">> => <<>>},
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assertEqual([], Options).
+
+conditional_put_options_trims_whitespace_around_wildcard_test() ->
+    Headers = #{<<"if-none-match">> => <<" * ">>},
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assert(lists:member({if_none_match, true}, Options)).
+
+conditional_put_options_returns_empty_when_no_conditionals_test() ->
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(#{}),
+    ?assertEqual([], Options).
+
 counter_delta_from_body_accepts_signed_integer_test() ->
     ?assertEqual({ok, 5}, riak_admin_api_riak:counter_delta_from_body(<<"5">>)),
     ?assertEqual({ok, -7}, riak_admin_api_riak:counter_delta_from_body(<<"-7">>)),

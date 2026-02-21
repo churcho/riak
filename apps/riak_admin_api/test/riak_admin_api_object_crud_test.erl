@@ -138,6 +138,31 @@ object_put_forwards_conditional_headers_test() ->
     {Status, _Headers, _Body} = receive_response_for_stream(put_stream),
     ?assertEqual(204, Status).
 
+object_put_rejects_entity_tag_if_none_match_test() ->
+    Req0 = #{
+        method => <<"PUT">>,
+        path => <<"/buckets/users/keys/alice">>,
+        headers => #{
+            <<"content-type">> => <<"application/octet-stream">>,
+            <<"if-none-match">> => <<"\"etag-1\"">>
+        },
+        body => <<"new-value">>,
+        pid => self(),
+        streamid => reject_inm_stream
+    },
+    Backend = fun(put, _Context, _Input) ->
+        {ok, #{status => 204, body => <<>>, content_type => <<"application/json; charset=utf-8">>}}
+    end,
+
+    {ok, _Req1, _State} = riak_admin_api_handler:init(
+        Req0,
+        route_opts(#{route_family => buckets, object_backend => Backend})),
+
+    {Status, _Headers, Body} = receive_response_for_stream(reject_inm_stream),
+    ?assertEqual(400, Status),
+    Decoded = jsx:decode(Body, [return_maps]),
+    ?assertEqual(<<"invalid_if_none_match">>, maps:get(<<"code">>, Decoded)).
+
 object_get_supports_sibling_response_form_test() ->
     Req0 = #{
         method => <<"GET">>,
