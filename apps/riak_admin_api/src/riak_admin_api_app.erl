@@ -214,7 +214,7 @@ audit_security_posture() ->
     MapredEnabled = application:get_env(
         riak_admin_api, mapred_backend_enabled, true),
     CutoverDefault = application:get_env(
-        riak_admin_api, cowboy_cutover_default_mode, disabled),
+        riak_admin_api, cowboy_cutover_default_mode, enabled),
     case {MapredEnabled, CutoverDefault, HasAuthn} of
         {true, Mode, false} when Mode =:= enabled; Mode =:= <<"enabled">> ->
             logger:warning("[riak_admin] SECURITY: MapReduce backend is "

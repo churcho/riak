@@ -2,29 +2,60 @@
 
 ## 1. Overview
 
-`riak_admin_api` is an OTP application that provides a REST API for Riak cluster
-administration. It runs on Cowboy 2.x alongside Riak's existing Webmachine/Mochiweb
-HTTP stack. The two servers coexist during a migration period:
+`riak_admin_api` is an OTP application that provides the HTTP interface for Riak
+cluster administration and data operations. It runs on Cowboy 2.x on a dedicated
+port (default 8099) and replaces the legacy Webmachine/Mochiweb stack.
 
-- **Webmachine** serves the data-path API (bucket/key CRUD) on port 10018 (default).
-- **Cowboy** serves admin endpoints and, optionally, substrate data-path routes on a
-  separate port (default 8099).
+The Cowboy stack serves both:
 
-The reasons for a parallel stack:
+- **Admin endpoints** (`/api/...`) -- cluster status, ring ownership, node stats,
+  handoff, AAE, DC discovery, and WebSocket event streaming.
+- **Data-path endpoints** -- full parity with the legacy Webmachine API: object
+  CRUD, bucket/key listing, secondary index queries, MapReduce, CRDTs, and counters.
 
-1. New endpoints are built on Cowboy from the start; existing Webmachine routes
-   continue to work unchanged.
-2. Admin traffic is isolated from data traffic -- a slow admin query cannot starve
-   KV read/write operations.
-3. Operators can apply separate firewall rules to the admin port (e.g. restrict to
-   management networks).
-4. Cowboy provides a modern HTTP/1.1 and HTTP/2 stack with native WebSocket
-   support and active upstream maintenance.
+All data-path routes are enabled by default (`cowboy_cutover_default_mode = enabled`).
+The legacy Webmachine listener on port 10018 remains available during the transition
+but is no longer the primary interface.
 
-The long-term goal is full migration of all Riak HTTP handling from Webmachine to
-Cowboy. Substrate routes (see Section 8) expose the same data-path operations on the
-Cowboy listener, gated by cutover controls (see Section 7) so that operators can
-migrate at their own pace.
+### Available routes
+
+**Admin:**
+
+| Path | Description |
+|------|-------------|
+| `GET /api/ping` | Liveness probe |
+| `GET /api/cluster/status` | Cluster membership and reachability |
+| `GET /api/dcs` | Datacenter discovery |
+| `GET /api/ring/ownership` | Full partition-to-node mapping |
+| `GET /api/nodes/:node/stats` | Per-node VM and KV statistics |
+| `GET /api/handoff/status` | Active handoff transfers |
+| `GET /api/aae/status` | Active anti-entropy exchanges |
+| `WS /api/stream/events` | Real-time event streaming |
+
+**Data path (substrate):**
+
+| Path pattern | Operations | Methods |
+|-------------|-----------|---------|
+| `/riak/:bucket/:key` | Object CRUD (v1 alias) | GET, PUT, POST, DELETE |
+| `/buckets/:bucket/keys/:key` | Object CRUD | GET, PUT, POST, DELETE |
+| `/types/:type/buckets/:bucket/keys/:key` | Object CRUD (typed) | GET, PUT, POST, DELETE |
+| `/buckets/:bucket/keys` | Key listing, server-generated key | GET, POST |
+| `/types/:type/buckets/:bucket/keys` | Key listing (typed) | GET, POST |
+| `/riak`, `/buckets`, `/types/:type/buckets` | Bucket listing | GET |
+| `/buckets/:bucket/props` | Bucket properties | GET, PUT, DELETE |
+| `/types/:type/buckets/:bucket/props` | Bucket properties (typed) | GET, PUT, DELETE |
+| `/types/:type/props` | Bucket type properties | GET, PUT |
+| `/buckets/:bucket/index/:idx/:val[/:end]` | Secondary index (2i) | GET |
+| `/types/:type/buckets/:bucket/index/:idx/:val[/:end]` | Secondary index (typed) | GET |
+| `/mapred` | MapReduce | POST |
+| `/types/:type/buckets/:bucket/datatypes/:key` | CRDT operations | GET, POST |
+| `/types/:type/buckets/:bucket/datatypes` | CRDT collection | POST |
+| `/buckets/:bucket/counters/:key` | Legacy counters | GET, POST |
+| `/types/:type/buckets/:bucket/query` | Query | POST |
+
+See [API Reference](doc/API_REFERENCE.md) for full request/response details and
+the [endpoint inventory](../../docs/plans/artifacts/cowboy-endpoint-inventory.md)
+for the legacy-to-Cowboy mapping.
 
 ---
 
@@ -302,12 +333,20 @@ by a cutover system that controls which operations are active.
 3. If the default mode is invalid, log an error and default to `disabled`.
 4. If a per-operation mode is invalid, return 503 (`route_cutover_misconfigured`).
 
-### Fail-closed default
+### Default: enabled
 
-The `.app.src` sets `cowboy_cutover_default_mode` to `disabled`. Operators must
-explicitly enable substrate routes by setting the default mode to `enabled` or by
-adding per-operation overrides. This prevents accidental exposure of data-path
-operations on the admin port.
+The `.app.src` sets `cowboy_cutover_default_mode` to `enabled`. All substrate
+routes serve traffic out of the box. To disable substrate routes (for example, to
+run Cowboy for admin endpoints only), set the default mode to `disabled` via
+`advanced.config`:
+
+```erlang
+[{riak_admin_api, [{cowboy_cutover_default_mode, disabled}]}].
+```
+
+Per-operation overrides in `cowboy_cutover_op_modes` take precedence over the
+default mode, so operators can disable individual operations while keeping the
+rest enabled.
 
 ### Mode normalization
 
@@ -467,7 +506,7 @@ All keys live under the `riak_admin_api` application environment.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `cowboy_cutover_default_mode` | atom/binary/string | `disabled` | Default cutover mode for substrate routes |
+| `cowboy_cutover_default_mode` | atom/binary/string | `enabled` | Default cutover mode for substrate routes |
 | `cowboy_cutover_op_modes` | proplist or map | `[]` | Per-operation cutover overrides: `[{op_atom, mode}, ...]` |
 
 ### Security

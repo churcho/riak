@@ -1630,7 +1630,7 @@ All settings are read from `riak_admin_api` application environment.
 |-----|---------|-------------|
 | `mapred_backend_enabled` | `true` | Enable/disable MapReduce backend |
 | `list_keys_error_mode` | `compat` | `compat` (200 + embedded error) or `strict` (proper HTTP status) |
-| `cowboy_cutover_default_mode` | `disabled` | Default cutover mode for substrate endpoints |
+| `cowboy_cutover_default_mode` | `enabled` | Default cutover mode for substrate endpoints |
 | `cowboy_cutover_op_modes` | `[]` | Per-operation cutover overrides (proplist or map) |
 
 ### Security Settings

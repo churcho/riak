@@ -1299,7 +1299,7 @@ Sets the baseline mode for all operations:
 
 ```erlang
 {riak_admin_api, [
-    {cowboy_cutover_default_mode, disabled}
+    {cowboy_cutover_default_mode, enabled}
 ]}
 ```
 
@@ -1309,7 +1309,7 @@ Override specific operation groups independently:
 
 ```erlang
 {riak_admin_api, [
-    {cowboy_cutover_default_mode, disabled},
+    {cowboy_cutover_default_mode, enabled},
     {cowboy_cutover_op_modes, [
         {object_item, deprecated},
         {bucket_props, enabled},
@@ -1351,10 +1351,10 @@ shadow      <<"shadow">>      "shadow"
 
 ### Migration Strategy
 
-1. Start with `cowboy_cutover_default_mode = disabled` (safe default)
-2. Enable specific operation groups via `cowboy_cutover_op_modes` for canary rollout
+1. All substrate routes are enabled by default -- data-path parity is active out of the box
+2. Use `cowboy_cutover_op_modes` to selectively disable or deprecate individual operations
 3. Use `shadow` mode on operations you want to observe without changing client behavior
-4. Use `deprecated` mode to log warnings for operations being migrated
+4. Use `deprecated` mode to log warnings for operations scheduled for removal
 5. Use `disabled` to temporarily block operations if issues arise
 6. Use `removed` for operations permanently retired from the Cowboy path
 
@@ -1504,7 +1504,7 @@ All configuration is under the `riak_admin_api` application key. Set values in `
 | `http_port` | `pos_integer()` | `8099` | Port for the Cowboy HTTP listener. Auto-computed as `100N5` in devrel. |
 | `dc_name` | `binary()` | `<<"default">>` | Datacenter name advertised via syn for multi-DC discovery. |
 | `riak_http_port` | `pos_integer()` | `8098` | Local Riak HTTP port stored in syn metadata. Auto-computed as `100N8` in devrel. |
-| `cowboy_cutover_default_mode` | `atom()` | `disabled` | Default cutover mode for all operations. Values: `enabled`, `deprecated`, `shadow`, `disabled`, `removed`. |
+| `cowboy_cutover_default_mode` | `atom()` | `enabled` | Default cutover mode for all operations. Values: `enabled`, `deprecated`, `shadow`, `disabled`, `removed`. |
 | `cowboy_cutover_op_modes` | `list() \| map()` | `[]` | Per-operation cutover overrides. Proplist of `{OpAtom, Mode}` or equivalent map. |
 | `security_require_tls` | `boolean()` | `false` | Require HTTPS semantics for requests to proceed. |
 | `security_trust_proxy_headers` | `boolean()` | `false` | Trust `X-Forwarded-Proto`; must be `true` when TLS terminates at a trusted proxy. |
@@ -1525,11 +1525,9 @@ All configuration is under the `riak_admin_api` application key. Set values in `
     {http_port, 8099},
     {dc_name, <<"us-east-1">>},
     {riak_http_port, 8098},
-    {cowboy_cutover_default_mode, disabled},
+    {cowboy_cutover_default_mode, enabled},
     {cowboy_cutover_op_modes, [
-        {mapred, deprecated},
-        {keys, enabled},
-        {object_item, enabled}
+        {mapred, deprecated}
     ]},
     {security_require_tls, true},
     {security_trust_proxy_headers, true},

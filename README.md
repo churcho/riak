@@ -54,16 +54,16 @@ The OpenRiak community is supported by [the Erlang Ecosystem Foundation](https:/
 
 ## Admin API
 
-Riak ships a Cowboy-based admin API on a dedicated port (default 8099) alongside the existing Webmachine data-path listener. Admin traffic is isolated from KV read/write operations — a slow admin query cannot starve your data path.
+Riak ships a Cowboy 2.x HTTP interface on port 8099 that replaces the legacy Webmachine stack. It provides the full Riak HTTP API — object CRUD, bucket/key listing, secondary index queries, MapReduce, CRDTs, counters — plus cluster admin endpoints and WebSocket event streaming. All data-path routes are enabled by default.
 
-The admin API provides:
+The Cowboy stack provides:
 
-- **Cluster observability** — membership, ring ownership, handoff status, AAE exchanges, per-node stats
-- **Data operations** — bucket/key CRUD, secondary index queries, MapReduce, CRDTs via substrate routes
-- **WebSocket streaming** — real-time cluster events pushed to connected clients
+- **Full data-path parity** — every operation from the legacy Webmachine API (`/riak/...`, `/buckets/...`, `/types/...`, `/mapred`) is available on the Cowboy listener
+- **Cluster observability** — membership, ring ownership, handoff, AAE, per-node stats
+- **WebSocket streaming** — real-time cluster events pushed over a single connection per client
 - **Multi-DC discovery** — datacenter-aware node registration via syn
 
-It starts automatically with Riak. To change the listen port, set `http_port` in `etc/advanced.config`:
+It starts automatically with Riak. The legacy Webmachine listener on port 10018 remains available during the transition. To change the Cowboy listen port:
 
 ```erlang
 [{riak_admin_api, [{http_port, 9099}]}].

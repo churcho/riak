@@ -730,7 +730,7 @@ request_opts(RouteOpts) ->
         require_auth => application:get_env(riak_admin_api, security_require_auth, false),
         authn_fun => application:get_env(riak_admin_api, authn_hook, undefined),
         authz_fun => application:get_env(riak_admin_api, authz_hook, undefined),
-        cutover_default_mode => application:get_env(riak_admin_api, cowboy_cutover_default_mode, disabled),
+        cutover_default_mode => application:get_env(riak_admin_api, cowboy_cutover_default_mode, enabled),
         cutover_op_modes => application:get_env(riak_admin_api, cowboy_cutover_op_modes, [])
     },
     maps:merge(Defaults, RouteMap).

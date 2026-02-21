@@ -42,11 +42,11 @@
         {http_port, 8099},        %% Default admin API port; distinct from Riak HTTP (10018)
         {dc_name, <<"default">>}, %% Datacenter name for multi-DC identification
         {riak_http_port, 8098},   %% Local Riak HTTP port (for DC metadata)
-        %% S0 hardening: substrate/data-path routes are disabled by default.
-        %% Operators must explicitly set cowboy_cutover_default_mode => enabled
-        %% or enable individual ops via cowboy_cutover_op_modes to expose
-        %% substrate endpoints on the admin port.
-        {cowboy_cutover_default_mode, disabled},
+        %% Substrate/data-path routes are enabled by default. The Cowboy
+        %% stack provides full parity with the legacy Webmachine API.
+        %% Set to 'disabled' to block substrate routes (503), or use
+        %% cowboy_cutover_op_modes for per-operation control.
+        {cowboy_cutover_default_mode, enabled},
         {cowboy_cutover_op_modes, []}
     ]},
     {modules, []}
