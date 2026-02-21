@@ -52,6 +52,36 @@ Discussions on the ongoing development of the OpenRiak version of Riak KV [can b
 
 The OpenRiak community is supported by [the Erlang Ecosystem Foundation](https://erlef.org/).
 
+## Admin API
+
+Riak ships a Cowboy-based admin API on a dedicated port (default 8099) alongside the existing Webmachine data-path listener. Admin traffic is isolated from KV read/write operations — a slow admin query cannot starve your data path.
+
+The admin API provides:
+
+- **Cluster observability** — membership, ring ownership, handoff status, AAE exchanges, per-node stats
+- **Data operations** — bucket/key CRUD, secondary index queries, MapReduce, CRDTs via substrate routes
+- **WebSocket streaming** — real-time cluster events pushed to connected clients
+- **Multi-DC discovery** — datacenter-aware node registration via syn
+
+It starts automatically with Riak. To change the listen port, set `http_port` in `etc/advanced.config`:
+
+```erlang
+[{riak_admin_api, [{http_port, 9099}]}].
+```
+
+### Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Admin API README](apps/riak_admin_api/README.md) | Architecture reference |
+| [API Reference](apps/riak_admin_api/doc/API_REFERENCE.md) | Full endpoint documentation |
+| [WebSocket Spec](apps/riak_admin_api/doc/WEBSOCKET_SPEC.md) | WebSocket event streaming |
+| [LiveView Integration](apps/riak_admin_api/doc/LIVEVIEW_INTEGRATION.md) | Phoenix LiveView integration |
+| [syn Integration](apps/riak_admin_api/doc/SYN_INTEGRATION.md) | Distributed discovery |
+| [Getting Started Guide](docs/cowboy-api-guide.md) | Quickstart for the Cowboy API |
+
+Architecture diagrams are in [`docs/architecture/`](docs/architecture/) (Excalidraw format).
+
 ## macOS Apple Silicon Code-Signing
 
 When building Riak on Apple Silicon Macs (M1/M2/M3/M4), `make devrel` copies the Erlang ERTS binaries (`beam.smp`, `erlexec`, `escript`, etc.) from your Erlang installation into each dev node's `erts-*/bin/` directory. Copying a Mach-O binary to a new path invalidates its ad-hoc code signature, and the macOS kernel enforces signature validation by killing unsigned binaries with `SIGKILL` (exit code 137).

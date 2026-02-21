@@ -145,8 +145,8 @@ dispatch_action(#{<<"action">> := <<"subscribe">>,
             {[{text, Frame}], State};
         true ->
             ValidTopics = riak_admin_api_event_bridge:available_topics(),
-            Requested = [T || T <- Topics, is_binary(T),
-                              lists:member(T, ValidTopics)],
+            Requested = lists:usort([T || T <- Topics, is_binary(T),
+                                          lists:member(T, ValidTopics)]),
             #{subscriptions := Current} = State,
             NewSubs = lists:usort(Current ++ Requested),
             State1 = State#{subscriptions := NewSubs,

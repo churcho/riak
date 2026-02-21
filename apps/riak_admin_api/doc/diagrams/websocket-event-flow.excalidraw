@@ -579,6 +579,57 @@
       "points": [[0,0],[140,0]], "lastCommittedPoint": null,
       "startBinding": null, "endBinding": null,
       "startArrowhead": null, "endArrowhead": "arrow", "elbowed": true
+    },
+    {
+      "id": "review-fix-dedup-box", "type": "rectangle",
+      "x": 855, "y": 178, "width": 160, "height": 40,
+      "angle": 0, "strokeColor": "#2563eb", "backgroundColor": "#e7f5ff",
+      "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": {"type": 3}, "seed": 700, "version": 1, "versionNonce": 700,
+      "isDeleted": false, "boundElements": [{"type": "text", "id": "review-fix-dedup-text"}],
+      "updated": 1, "link": null, "locked": false
+    },
+    {
+      "id": "review-fix-dedup-text", "type": "text",
+      "x": 860, "y": 185, "width": 150, "height": 26,
+      "angle": 0, "strokeColor": "#222b34", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 701, "version": 1, "versionNonce": 701,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "dedup topics\n(lists:usort/1)", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "center", "verticalAlign": "middle", "baseline": 10,
+      "containerId": "review-fix-dedup-box",
+      "originalText": "dedup topics\n(lists:usort/1)", "lineHeight": 1.25
+    },
+    {
+      "id": "review-fix-dedup-arrow", "type": "arrow",
+      "x": 855, "y": 198, "width": 30, "height": 0,
+      "angle": 0, "strokeColor": "#2563eb", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "dashed",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 702, "version": 1, "versionNonce": 702,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "points": [[0,0],[-30,0]], "lastCommittedPoint": null,
+      "startBinding": null, "endBinding": null,
+      "startArrowhead": null, "endArrowhead": "arrow", "elbowed": true
+    },
+    {
+      "id": "review-fix-dedup-note", "type": "text",
+      "x": 855, "y": 222, "width": 160, "height": 14,
+      "angle": 0, "strokeColor": "#2563eb", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 703, "version": 1, "versionNonce": 703,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "before snapshot delivery", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "left", "verticalAlign": "top", "baseline": 10,
+      "containerId": null,
+      "originalText": "before snapshot delivery", "lineHeight": 1.25
     }
   ],
   "appState": {

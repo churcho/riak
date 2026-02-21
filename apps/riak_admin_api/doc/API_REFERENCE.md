@@ -43,6 +43,8 @@ All responses include an `X-Request-Id` header (client-supplied via the same hea
 
 ## Admin Endpoints
 
+See [diagrams/request-lifecycle.excalidraw](diagrams/request-lifecycle.excalidraw) for the request processing pipeline and [diagrams/security-pipeline.excalidraw](diagrams/security-pipeline.excalidraw) for the security enforcement flow.
+
 All admin endpoints accept only **GET** requests and go through the `ensure_admin_get` security pipeline (TLS check, authn/authz hooks). Non-GET methods return `405 Method Not Allowed`.
 
 > **Note:** Admin endpoint routes are served by individual handler modules
@@ -131,7 +133,7 @@ Returns cluster membership, ring distribution, node reachability, and remote dat
 | `nodes[].name` | string | Erlang node name |
 | `nodes[].status` | string | Membership status: `valid`, `leaving`, `exiting`, `joining`, `down` |
 | `nodes[].ring_pct` | float | Percentage of ring owned (2 decimal places) |
-| `nodes[].reachable` | boolean | Whether the node responded to ping within timeout |
+| `nodes[].reachable` | boolean | Whether the node responded to ping within timeout. Ping uses a deadline-based timeout (absolute wall-clock cutoff) rather than a per-node relative timeout, preventing drift when pinging multiple nodes sequentially. |
 | `pending_changes` | array | Stringified pending ring changes |
 | `remote_dcs` | array | List of remote datacenters (see [DC Discovery](#datacenter-discovery) for shape) |
 | `total_dcs` | integer | Count of all DCs (local + remote) |
@@ -641,7 +643,8 @@ Execute a MapReduce job.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `inputs` | array/string | Yes | Input specification (bucket name, list of `[bucket, key]` pairs, etc.) |
-| `query` | array | Yes | List of map/reduce phase specifications |
+| `query` | array | Yes | List of phase specifications. Each phase object must have exactly one key identifying the phase type: `map`, `reduce`, or `link`. Unknown phase types are rejected with `400 invalid_body`. |
+| `timeout` | integer | No | Execution timeout in milliseconds. Capped at `stream_collection_ceiling_ms` (default 300,000 ms), same as query-string timeouts. |
 
 **Response (200 OK) -- Non-chunked:**
 
@@ -667,7 +670,7 @@ Content-Type: application/json
 
 | Status | Code | When |
 |--------|------|------|
-| 400 | `invalid_body` | Missing `inputs`/`query`, invalid JSON, malformed phases |
+| 400 | `invalid_body` | Missing `inputs`/`query`, invalid JSON, malformed phases, or unknown phase type (must be `map`, `reduce`, or `link`) |
 | 400 | `invalid_query` | Phase configuration error |
 | 405 | `method_not_allowed` | Non-GET/HEAD/POST method |
 | 501 | `not_implemented` | MapReduce backend modules not available |
@@ -1409,7 +1412,7 @@ Execute complex multi-index queries with aggregation support.
 | `accumulation_option` | string | No | Result accumulation mode: `keys`, `terms`, `count`, `raw_keys`, `raw_terms`, `raw_count`, `term_with_count`, `term_with_rawcount` |
 | `accumulation_term` | string | No | Term for accumulation |
 | `substitutions` | object | No | Variable substitutions for expressions |
-| `timeout` | integer | No | Timeout in seconds (default 60) |
+| `timeout` | integer | No | Timeout in seconds (default 60). Capped at `stream_collection_ceiling_ms` (default 300s) before execution. |
 | `max_results` | integer | No | Maximum result count |
 | `continuation` | string | No | Continuation from previous response |
 
@@ -1493,6 +1496,7 @@ Streaming endpoints use **chunked transfer encoding** via Cowboy's `stream_reply
    ```
    {"error": "timeout"}
    ```
+   Both key streams and bucket streams handle generic `{error, Reason}` messages from the backend, so errors surface with their actual reason rather than being masked as timeouts.
 
 2. **Multipart streaming** (index queries, chunked MapReduce) -- Standard multipart/mixed with boundary:
    ```
@@ -1517,7 +1521,7 @@ When active, responses include:
 |--------|-------|
 | `Access-Control-Allow-Origin` | The matching origin |
 | `Access-Control-Allow-Methods` | `GET, HEAD, PUT, POST, DELETE, OPTIONS` |
-| `Access-Control-Allow-Headers` | `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin` |
+| `Access-Control-Allow-Headers` | `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, Authorization, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin` |
 | `Access-Control-Expose-Headers` | `X-Request-Id, X-Riak-Vclock, ETag, Last-Modified, Link, Location` |
 | `Access-Control-Max-Age` | `3600` |
 | `Vary` | `Origin` |

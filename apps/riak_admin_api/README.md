@@ -30,7 +30,8 @@ migrate at their own pace.
 
 ## 2. Module Map
 
-15 modules organized by layer.
+See [`doc/diagrams/module-architecture.excalidraw`](doc/diagrams/module-architecture.excalidraw)
+for a visual layout. 15 modules organized by layer.
 
 ### Application layer
 
@@ -51,6 +52,9 @@ migrate at their own pace.
 | `rah_nodes` | `GET /api/nodes/:node/stats` | Per-node VM and riak_kv statistics (local or RPC) |
 | `rah_handoff` | `GET /api/handoff/status` | Active handoff transfers with count |
 | `rah_aae` | `GET /api/aae/status` | Active anti-entropy exchanges with count |
+| `rah_events_ws` | `WS /api/stream/events` | WebSocket event streaming with topic subscriptions |
+
+See [`doc/diagrams/websocket-event-flow.excalidraw`](doc/diagrams/websocket-event-flow.excalidraw) for the event flow from sources through the bridge to WebSocket clients.
 
 ### Pipeline (request/response)
 
@@ -76,6 +80,9 @@ migrate at their own pace.
 
 ## 3. Request Lifecycle
 
+See [`doc/diagrams/request-lifecycle.excalidraw`](doc/diagrams/request-lifecycle.excalidraw)
+for a visual overview.
+
 ### Admin endpoints (`rah_*`)
 
 ```
@@ -90,6 +97,10 @@ HTTP request
   -> json_reply or error_reply
   -> HTTP response
 ```
+
+**Cluster status ping collection** uses deadline-based timeouts. `collect_ping_results/4`
+computes an absolute deadline at the start and uses the remaining time for each
+`receive`, preventing timeout drift when responses arrive at staggered intervals.
 
 ### Substrate endpoints (`riak_admin_api_handler`)
 
@@ -125,6 +136,8 @@ JSON error with status code, error code, reason, and request ID.
 
 ## 4. Supervision Tree
 
+See [`doc/diagrams/supervision-tree.excalidraw`](doc/diagrams/supervision-tree.excalidraw).
+
 ```
 riak_admin_api_sup (rest_for_one, intensity=5, period=10)
   |
@@ -148,6 +161,9 @@ unavailability.
 ---
 
 ## 5. syn Integration
+
+See [`doc/diagrams/syn-discovery.excalidraw`](doc/diagrams/syn-discovery.excalidraw)
+for the discovery flow.
 
 The application uses [syn](https://github.com/ostinelli/syn) 3.3.0 for distributed
 process registration and group-based node discovery.
@@ -244,8 +260,18 @@ is included in all responses as the `X-Request-Id` header and in error payloads.
 
 ### Timeout caps
 
-Client-requested `timeout` query parameters are capped at `max_server_timeout_ms`
-(default 300000ms / 5 minutes) to prevent indefinite resource holds.
+All client-controlled timeouts are capped via `cap_timeout/2` to prevent indefinite
+resource holds:
+
+- **Query-string `timeout` params** — capped at `max_server_timeout_ms` (default
+  300000ms / 5 minutes).
+- **POST body timeouts** — complex query requests (`make_complex_query/2`) cap the
+  timeout embedded in the JSON body at `stream_collection_ceiling()`.
+- **MapReduce timeouts** — `mapred_operation_legacy/2` caps the timeout parsed by
+  `riak_kv_mapred_json:parse_request/1` via `cap_timeout/2`.
+
+See [`doc/diagrams/security-pipeline.excalidraw`](doc/diagrams/security-pipeline.excalidraw)
+for a visual overview of the security pipeline, including timeout enforcement points.
 
 ### Startup audit
 
@@ -336,9 +362,14 @@ Each substrate path resolves to an operation atom that drives dispatch:
 | `crdt_collection` | Create a new CRDT (POST) |
 | `query` | Riak query (POST with JSON body) |
 | `index_query` | Secondary index query (exact match or range) |
-| `mapred` | MapReduce job submission |
+| `mapred` | MapReduce job submission (phase types validated: map, reduce, link) |
 | `object_item` | Get/put/post/delete a single object |
 | `object_collection` | Create an object with server-generated key |
+
+**MapReduce validation.** `validate_mapred_body/1` checks that each query phase
+uses an allowed type (`map`, `reduce`, `link`) before delegating to
+`riak_kv_mapred_json`. Invalid phase types are rejected with a 400 before
+execution begins.
 
 ---
 
@@ -369,6 +400,10 @@ For large result sets (key lists, index results, mapreduce chunks):
 The handler wraps streaming in try/catch. On emission failure, a JSON error chunk
 is sent as the final frame.
 
+Bucket stream collectors (`collect_stream_buckets_loop/3`, `stream_buckets_chunked_loop/3`)
+handle generic backend errors via `{ReqId, {error, Reason}}` — not just timeouts. This
+matches the error pattern already used in key stream collection.
+
 ### Error payloads
 
 All errors are JSON objects with a consistent shape:
@@ -392,7 +427,7 @@ the response includes:
 
 - `Access-Control-Allow-Origin: <origin>`
 - `Access-Control-Allow-Methods: GET, HEAD, PUT, POST, DELETE, OPTIONS`
-- `Access-Control-Allow-Headers: Content-Type, X-Request-Id, X-Riak-Vclock, ...`
+- `Access-Control-Allow-Headers: Content-Type, X-Request-Id, X-Riak-Vclock, Authorization, ...`
 - `Access-Control-Expose-Headers: X-Request-Id, X-Riak-Vclock, ETag, ...`
 - `Access-Control-Max-Age: 3600`
 

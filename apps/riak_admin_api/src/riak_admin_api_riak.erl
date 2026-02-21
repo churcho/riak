@@ -1188,7 +1188,10 @@ collect_stream_buckets_loop(ReqId, Acc, Timeout) ->
             collect_stream_buckets_loop(ReqId, [encode_bucket_list(Buckets) | Acc], Timeout);
         {ReqId, {error, timeout}} ->
             logger:warning("[riak_admin] bucket stream timed out (backend timeout)"),
-            iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]))
+            iolist_to_binary(lists:reverse([encode_bucket_stream_timeout() | Acc]));
+        {ReqId, {error, Reason}} ->
+            logger:warning("[riak_admin] bucket stream error: ~p", [Reason]),
+            iolist_to_binary(lists:reverse([encode_stream_error(Reason) | Acc]))
     after Timeout ->
         logger:warning("[riak_admin] bucket stream timed out after ~Bms ceiling",
                        [Timeout]),
@@ -1214,7 +1217,10 @@ stream_buckets_chunked_loop(ReqId, Timeout, Emit) ->
             stream_buckets_chunked_loop(ReqId, Timeout, Emit);
         {ReqId, {error, timeout}} ->
             logger:warning("[riak_admin] bucket stream timed out (backend timeout)"),
-            Emit(encode_bucket_stream_timeout(), fin)
+            Emit(encode_bucket_stream_timeout(), fin);
+        {ReqId, {error, Reason}} ->
+            logger:warning("[riak_admin] bucket stream error: ~p", [Reason]),
+            Emit(encode_stream_error(Reason), fin)
     after Timeout ->
         logger:warning("[riak_admin] bucket stream timed out after ~Bms ceiling",
                        [Timeout]),
@@ -2232,7 +2238,8 @@ check_query_keys(Keys, RequiredKeys, PossibleKeys) ->
 
 make_complex_query(BucketType, QueryMap) ->
     TimeoutDefault = application:get_env(riak_kv, query_timeout_secs, ?QUERY_DEFAULT_TIMEOUT_SECS),
-    Timeout = maps:get(?QUERY_KEY_TIMEOUT, QueryMap, TimeoutDefault),
+    Timeout0 = maps:get(?QUERY_KEY_TIMEOUT, QueryMap, TimeoutDefault),
+    Timeout = cap_timeout(Timeout0, stream_collection_ceiling()),
     case Timeout of
         T when is_integer(T), T > 0 ->
             QueryList = maps:get(?QUERY_KEY_QUERY_LIST, QueryMap),
@@ -2436,9 +2443,27 @@ validate_mapred_body(BodyMap) ->
             {error, <<"The POST body was missing the \"inputs\" or \"query\" field.">>};
         {_Inputs, QueryPhases} when not is_list(QueryPhases) ->
             {error, <<"The value of the \"query\" field was not a list">>};
-        _ ->
-            ok
+        {_Inputs, QueryPhases} ->
+            validate_mapred_phases(QueryPhases)
     end.
+
+%% @doc Validate that all MapReduce phases use allowed phase types.
+%% This provides a safety net before delegating to riak_kv_mapred_json.
+-spec validate_mapred_phases([term()]) -> ok | {error, binary()}.
+validate_mapred_phases([]) -> ok;
+validate_mapred_phases([Phase | Rest]) when is_map(Phase) ->
+    AllowedTypes = [<<"map">>, <<"reduce">>, <<"link">>],
+    PhaseKeys = maps:keys(Phase),
+    case [K || K <- PhaseKeys, lists:member(K, AllowedTypes)] of
+        [] ->
+            {error, iolist_to_binary([
+                <<"Unknown MapReduce phase type. Allowed: ">>,
+                lists:join(<<", ">>, AllowedTypes)])};
+        _ ->
+            validate_mapred_phases(Rest)
+    end;
+validate_mapred_phases([_BadPhase | _]) ->
+    {error, <<"Each query phase must be a JSON object">>}.
 
 mapred_backend_available() ->
     code:which(riak_kv_mapred_json) =/= non_existing andalso
@@ -2473,7 +2498,8 @@ mapred_operation_legacy(Context, Input) ->
     QueryParams = maps:get(query, Context, #{}),
     Chunked = query_truthy(<<"chunked">>, QueryParams),
     case riak_kv_mapred_json:parse_request(Body) of
-        {ok, ParsedInputs, ParsedQuery, Timeout} ->
+        {ok, ParsedInputs, ParsedQuery, Timeout0} ->
+            Timeout = cap_timeout(Timeout0, stream_collection_ceiling()),
             case riak_kv_mrc_pipe:mapred_stream_sink(ParsedInputs, ParsedQuery, Timeout) of
                 {ok, Mrc} ->
                     try
@@ -2775,7 +2801,8 @@ parallel_ping_nodes(Nodes, PingTimeout) ->
             end),
             Pid
         end, Nodes),
-    Results = collect_ping_results(Ref, length(Nodes), PingTimeout, #{}),
+    Deadline = erlang:monotonic_time(millisecond) + PingTimeout,
+    Results = collect_ping_results(Ref, length(Nodes), Deadline, #{}),
     %% Kill timed-out processes and flush their DOWN messages
     lists:foreach(fun(Pid) ->
         exit(Pid, kill)
@@ -2783,16 +2810,22 @@ parallel_ping_nodes(Nodes, PingTimeout) ->
     flush_ping_monitors(Ref, Pids),
     Results.
 
-collect_ping_results(_Ref, 0, _Timeout, Acc) ->
+collect_ping_results(_Ref, 0, _Deadline, Acc) ->
     Acc;
-collect_ping_results(Ref, Remaining, Timeout, Acc) ->
-    receive
-        {Ref, Node, Result} ->
-            collect_ping_results(Ref, Remaining - 1, Timeout,
-                                 Acc#{Node => Result})
-    after Timeout ->
-        %% Remaining nodes are unreachable (timed out)
-        Acc
+collect_ping_results(Ref, Remaining, Deadline, Acc) ->
+    Remaining_ms = Deadline - erlang:monotonic_time(millisecond),
+    case Remaining_ms > 0 of
+        true ->
+            receive
+                {Ref, Node, Result} ->
+                    collect_ping_results(Ref, Remaining - 1, Deadline,
+                                         Acc#{Node => Result})
+            after Remaining_ms ->
+                %% Remaining nodes are unreachable (timed out)
+                Acc
+            end;
+        false ->
+            Acc
     end.
 
 flush_ping_monitors(_Ref, []) ->

@@ -100,6 +100,10 @@ In a devrel the port is auto-resolved from the node name and written back to app
 
 ## 3. Architecture
 
+See the architecture diagrams for visual overviews:
+- [cowboy-request-lifecycle.excalidraw](architecture/cowboy-request-lifecycle.excalidraw) -- full request processing pipeline
+- [cowboy-data-operations.excalidraw](architecture/cowboy-data-operations.excalidraw) -- object CRUD, streaming queries, and CRDT operations
+
 ### Module Overview
 
 | Module | Role |
@@ -873,7 +877,9 @@ The `inputs` field can be:
 - A list of `[bucket, key]` pairs
 - A list of `[bucket, key, keydata]` triples
 
-The `query` field is a list of map and/or reduce phase specifications.
+The `query` field is a list of phase specifications. Each phase object must have exactly one key identifying the phase type: `map`, `reduce`, or `link`. Unknown phase types are rejected with `400 invalid_body`.
+
+The optional `timeout` field (integer, milliseconds) sets the execution deadline. This value is capped at `stream_collection_ceiling_ms` (default 300,000 ms), the same ceiling applied to query-string timeouts.
 
 ### Query Parameters
 
@@ -909,7 +915,7 @@ Content-Type: application/json
 
 **Allowed Methods:** GET, HEAD, POST
 
-**Status Codes:** 200 OK, 400 Bad Request (invalid body/query), 500 Internal Server Error (phase/runtime error), 503 Service Unavailable (timeout or operator-disabled backend), 501 Not Implemented (MapReduce backend unavailable in build)
+**Status Codes:** 200 OK, 400 Bad Request (invalid body/query/unknown phase type), 500 Internal Server Error (phase/runtime error), 503 Service Unavailable (timeout or operator-disabled backend), 501 Not Implemented (MapReduce backend unavailable in build)
 
 ---
 
@@ -1232,7 +1238,7 @@ When `security_trusted_origins` is configured and the request `Origin` matches a
 
 - `Access-Control-Allow-Origin`: the matched origin value
 - `Access-Control-Allow-Methods`: `GET, HEAD, PUT, POST, DELETE, OPTIONS`
-- `Access-Control-Allow-Headers`: `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin`
+- `Access-Control-Allow-Headers`: `Content-Type, X-Request-Id, X-Riak-Vclock, X-Riak-ClientId, Authorization, If-Match, If-None-Match, If-Unmodified-Since, If-Modified-Since, Origin`
 - `Access-Control-Expose-Headers`: `X-Request-Id, X-Riak-Vclock, ETag, Last-Modified, Link, Location`
 - `Access-Control-Max-Age`: `3600`
 
@@ -1508,6 +1514,7 @@ All configuration is under the `riak_admin_api` application key. Set values in `
 | `authz_hook` | `fun/1\|fun/2\|{M,F}\|{M,F,2}` | `undefined` | Authorization hook used by request normalization. |
 | `max_request_body_bytes` | `integer()` | `5242880` | Request body size limit; larger payloads return `413 payload_too_large`. Enforced on both chunked reads and pre-populated body paths (S5). |
 | `list_keys_error_mode` | `compat\|strict` | `compat` | `compat` returns `200` with embedded error for list-keys failures; `strict` returns HTTP error status. |
+| `stream_collection_ceiling_ms` | `pos_integer()` | `300000` | Upper bound on all operation timeouts -- both query-string and request-body timeouts are capped to this value (5 minutes). |
 | `stream_incremental_enabled` | `boolean()` | `true` | Enable incremental chunked streaming for stream-mode keys/index/mapred/buckets responses. |
 | `mapred_backend_enabled` | `boolean()` | `true` | Operator toggle for mapreduce execution (`false` returns `503 service_unavailable`). |
 

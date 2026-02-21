@@ -2026,6 +2026,57 @@
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "elbowed": true
+    },
+    {
+      "id": "review-fix-cap-timeout-box", "type": "rectangle",
+      "x": 450, "y": 549, "width": 200, "height": 52,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "#fff3bf",
+      "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid",
+      "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": {"type": 3}, "seed": 800, "version": 1, "versionNonce": 800,
+      "isDeleted": false, "boundElements": [{"type": "text", "id": "review-fix-cap-timeout-text"}],
+      "updated": 1, "link": null, "locked": false
+    },
+    {
+      "id": "review-fix-cap-timeout-text", "type": "text",
+      "x": 455, "y": 555, "width": 190, "height": 40,
+      "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 801, "version": 1, "versionNonce": 801,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "cap_timeout/2\nClamps to 300s ceiling", "fontSize": 14, "fontFamily": 1,
+      "textAlign": "center", "verticalAlign": "middle", "baseline": 12,
+      "containerId": "review-fix-cap-timeout-box",
+      "originalText": "cap_timeout/2\nClamps to 300s ceiling", "lineHeight": 1.25
+    },
+    {
+      "id": "review-fix-cap-timeout-arrow", "type": "arrow",
+      "x": 450, "y": 575, "width": 50, "height": 0,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "dashed",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 802, "version": 1, "versionNonce": 802,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "points": [[0,0],[-50,0]], "lastCommittedPoint": null,
+      "startBinding": null, "endBinding": null,
+      "startArrowhead": null, "endArrowhead": "arrow", "elbowed": true
+    },
+    {
+      "id": "review-fix-cap-timeout-note", "type": "text",
+      "x": 450, "y": 605, "width": 200, "height": 28,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 803, "version": 1, "versionNonce": 803,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "Applied after query normalization,\nbefore dispatch (QS + POST body)", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "left", "verticalAlign": "top", "baseline": 10,
+      "containerId": null,
+      "originalText": "Applied after query normalization,\nbefore dispatch (QS + POST body)", "lineHeight": 1.25
     }
   ],
   "appState": {

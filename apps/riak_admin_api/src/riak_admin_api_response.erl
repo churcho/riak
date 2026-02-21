@@ -153,9 +153,10 @@ cors_headers(Opts, _BaseHeaders) ->
                         <<"access-control-allow-methods">> =>
                             <<"GET, HEAD, PUT, POST, DELETE, OPTIONS">>,
                         <<"access-control-allow-headers">> =>
-                            <<"Content-Type, X-Request-Id, X-Riak-Vclock, "
-                              "X-Riak-ClientId, If-Match, If-None-Match, "
-                              "If-Unmodified-Since, If-Modified-Since, Origin">>,
+                            <<"Authorization, Content-Type, X-Request-Id, "
+                              "X-Riak-Vclock, X-Riak-ClientId, If-Match, "
+                              "If-None-Match, If-Unmodified-Since, "
+                              "If-Modified-Since, Origin">>,
                         <<"access-control-expose-headers">> =>
                             <<"X-Request-Id, X-Riak-Vclock, ETag, "
                               "Last-Modified, Link, Location">>,

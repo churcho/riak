@@ -2708,6 +2708,44 @@
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "elbowed": true
+    },
+    {
+      "id": "review-fix-mr-timeout", "type": "text",
+      "x": 392, "y": 1080, "width": 270, "height": 42,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 900, "version": 1, "versionNonce": 900,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "Review fixes:\n* cap_timeout/2 bounds MR + query timeouts (300s)\n* Phase validation: map | reduce | link only", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "left", "verticalAlign": "top", "baseline": 10,
+      "containerId": null,
+      "originalText": "Review fixes:\n* cap_timeout/2 bounds MR + query timeouts (300s)\n* Phase validation: map | reduce | link only", "lineHeight": 1.25
+    },
+    {
+      "id": "review-fix-mr-bracket", "type": "rectangle",
+      "x": 388, "y": 1074, "width": 278, "height": 56,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "dashed",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 901, "version": 1, "versionNonce": 901,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false
+    },
+    {
+      "id": "review-fix-stream-error", "type": "text",
+      "x": 392, "y": 1140, "width": 270, "height": 28,
+      "angle": 0, "strokeColor": "#d97706", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 902, "version": 1, "versionNonce": 902,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "Stream loops now handle generic\n{error, Reason} (not just timeout)", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "left", "verticalAlign": "top", "baseline": 10,
+      "containerId": null,
+      "originalText": "Stream loops now handle generic\n{error, Reason} (not just timeout)", "lineHeight": 1.25
     }
   ],
   "appState": {

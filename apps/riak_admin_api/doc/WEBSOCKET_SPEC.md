@@ -18,6 +18,8 @@ progress ticks forward without refreshing.
 
 ## Architecture overview
 
+See [diagrams/websocket-event-flow.excalidraw](diagrams/websocket-event-flow.excalidraw) for a visual overview of the event flow from sources through the bridge to WebSocket clients.
+
 ```
 Browser
   |
@@ -299,6 +301,10 @@ Response:
 ```json
 {"type": "subscribed", "topics": ["ring", "cluster", "node_stats"]}
 ```
+
+Duplicate topics in the `topics` array are deduplicated before
+processing. Sending `["ring", "ring", "ring"]` is equivalent to
+`["ring"]`. This prevents redundant snapshot delivery.
 
 On subscribe, the server pushes the current snapshot for each genuinely
 new topic. Re-subscribing to an already-active topic is idempotent and

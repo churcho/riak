@@ -459,6 +459,30 @@
       "verticalAlign": "top", "baseline": 10,
       "containerId": null,
       "originalText": "403\nForbidden", "lineHeight": 1.25
+    },
+    {
+      "id": "review-fix-cors-note", "type": "text",
+      "x": 140, "y": 200, "width": 350, "height": 32,
+      "angle": 0, "strokeColor": "#2563eb", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 500, "version": 1, "versionNonce": 500,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false,
+      "text": "CORS allow-headers: Content-Type, Authorization\n(Authorization added for authenticated cross-origin requests)", "fontSize": 11, "fontFamily": 1,
+      "textAlign": "center", "verticalAlign": "top", "baseline": 10,
+      "containerId": null,
+      "originalText": "CORS allow-headers: Content-Type, Authorization\n(Authorization added for authenticated cross-origin requests)", "lineHeight": 1.25
+    },
+    {
+      "id": "review-fix-cors-bracket", "type": "rectangle",
+      "x": 130, "y": 192, "width": 370, "height": 48,
+      "angle": 0, "strokeColor": "#2563eb", "backgroundColor": "transparent",
+      "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "dashed",
+      "roughness": 0, "opacity": 100, "groupIds": [], "frameId": null,
+      "roundness": null, "seed": 501, "version": 1, "versionNonce": 501,
+      "isDeleted": false, "boundElements": null, "updated": 1,
+      "link": null, "locked": false
     }
   ],
   "appState": {
