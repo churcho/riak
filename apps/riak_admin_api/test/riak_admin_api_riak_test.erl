@@ -211,6 +211,32 @@ build_location_respects_alias_families_test() ->
             #{alias => types, bucket_type => <<"maps">>, bucket => <<"users">>},
             Key)).
 
+conditional_put_options_accepts_supported_headers_test() ->
+    VClock = base64:encode(riak_object:encode_vclock(vclock:fresh())),
+    Headers = #{
+        <<"if-none-match">> => <<"*">>,
+        <<"x-riak-if-not-modified">> => VClock
+    },
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assert(lists:member({if_none_match, true}, Options)),
+    ?assert(lists:keymember(if_not_modified, 1, Options)).
+
+conditional_put_options_rejects_non_wildcard_if_none_match_test() ->
+    Headers = #{<<"if-none-match">> => <<"\"etag-1\"">>},
+    {error, Error} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assertEqual(400, maps:get(status, Error)),
+    ?assertEqual(<<"invalid_if_none_match">>, maps:get(code, Error)).
+
+conditional_put_options_accepts_if_match_test() ->
+    Headers = #{<<"if-match">> => <<"\"etag-1\"">>},
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assert(lists:keymember(if_match, 1, Options)).
+
+conditional_put_options_accepts_if_unmodified_since_test() ->
+    Headers = #{<<"if-unmodified-since">> => <<"Wed, 19 Feb 2026 13:00:00 GMT">>},
+    {ok, Options} = riak_admin_api_riak:conditional_put_options(Headers),
+    ?assert(lists:keymember(if_unmodified_since, 1, Options)).
+
 counter_delta_from_body_accepts_signed_integer_test() ->
     ?assertEqual({ok, 5}, riak_admin_api_riak:counter_delta_from_body(<<"5">>)),
     ?assertEqual({ok, -7}, riak_admin_api_riak:counter_delta_from_body(<<"-7">>)),

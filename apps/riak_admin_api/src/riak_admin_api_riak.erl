@@ -100,7 +100,9 @@
     stream_incremental_enabled/0,
     mapred_backend_enabled/0,
     check_write_preconditions/3,
-    maybe_crdt_collection_redirect/1
+    maybe_crdt_collection_redirect/1,
+    %% D01 test exports
+    conditional_put_options/1
 ]).
 -endif.
 
@@ -459,31 +461,52 @@ build_store_doc(Context, Input) ->
     end.
 
 conditional_put_options(Headers) ->
-    Cond0 = case maps:is_key(<<"if-none-match">>, Headers) of
-        true -> [{if_none_match, true}];
-        false -> []
-    end,
-    %% S2 (CG-004): Extract If-Match and If-Unmodified-Since for
-    %% HTTP-layer conditional enforcement (checked before write).
-    Cond1 = case maps:get(<<"if-match">>, Headers, undefined) of
-        undefined -> Cond0;
-        ETag -> [{if_match, strip_etag_quotes(ETag)} | Cond0]
-    end,
-    Cond2 = case maps:get(<<"if-unmodified-since">>, Headers, undefined) of
-        undefined -> Cond1;
-        DateStr -> [{if_unmodified_since, DateStr} | Cond1]
-    end,
-    case maps:get(<<"x-riak-if-not-modified">>, Headers, undefined) of
+    case if_none_match_option(Headers) of
+        {ok, Cond0} ->
+            %% S2 (CG-004): Extract If-Match and If-Unmodified-Since for
+            %% HTTP-layer conditional enforcement (checked before write).
+            Cond1 = case maps:get(<<"if-match">>, Headers, undefined) of
+                undefined -> Cond0;
+                ETag -> [{if_match, strip_etag_quotes(ETag)} | Cond0]
+            end,
+            Cond2 = case maps:get(<<"if-unmodified-since">>, Headers, undefined) of
+                undefined -> Cond1;
+                DateStr -> [{if_unmodified_since, DateStr} | Cond1]
+            end,
+            case maps:get(<<"x-riak-if-not-modified">>, Headers, undefined) of
+                undefined ->
+                    {ok, Cond2};
+                VClockB64 ->
+                    case decode_vclock(VClockB64) of
+                        {ok, VClock} -> {ok, [{if_not_modified, VClock} | Cond2]};
+                        {error, _} ->
+                            {error, #{
+                                status => 400,
+                                code => <<"invalid_vclock">>,
+                                reason => <<"Invalid X-Riak-If-Not-Modified header">>
+                            }}
+                    end
+            end;
+        {error, _} = E ->
+            E
+    end.
+
+%% D01: Only If-None-Match: * is supported; reject entity-tag values.
+if_none_match_option(Headers) ->
+    case maps:get(<<"if-none-match">>, Headers, undefined) of
         undefined ->
-            {ok, Cond2};
-        VClockB64 ->
-            case decode_vclock(VClockB64) of
-                {ok, VClock} -> {ok, [{if_not_modified, VClock} | Cond2]};
-                {error, _} ->
+            {ok, []};
+        <<>> ->
+            {ok, []};
+        Value ->
+            case trim_binary(to_bin(Value)) of
+                <<"*">> ->
+                    {ok, [{if_none_match, true}]};
+                _ ->
                     {error, #{
                         status => 400,
-                        code => <<"invalid_vclock">>,
-                        reason => <<"Invalid X-Riak-If-Not-Modified header">>
+                        code => <<"invalid_if_none_match">>,
+                        reason => <<"If-None-Match only supports '*' in this API">>
                     }}
             end
     end.
