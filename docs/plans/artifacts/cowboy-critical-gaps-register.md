@@ -16,7 +16,7 @@ Status: Active
 | CG-001 | P1 | Stream-mode uses aggregated response bodies instead of true incremental Cowboy streaming/backpressure | Closed (S2) | Yes | Gateway now returns `{stream, StreamInit, ChunkFun}` for key/bucket/index/mapred paths; handler uses `cowboy_req:stream_reply/3` + `stream_body/3`; toggle `stream_incremental_enabled` (default `true`) preserves compat path | N/A |
 | CG-002 | P1 | Telemetry lacked explicit `error_code` dimension | Closed (D01) | Yes | Added `error_code` telemetry tag dimension and error telemetry context propagation | N/A |
 | CG-003 | P0 | Cutover misconfiguration risk: invalid `cowboy_cutover_op_modes` values silently enabled routes | Closed (D01) | Yes | Invalid per-op mode now fails closed with `503 route_cutover_misconfigured` | N/A |
-| CG-004 | P0 | Conditional write enforcement gaps for `If-Match` and `If-Unmodified-Since` | Closed (S2) | Yes | Added `check_write_preconditions/3` with read-before-write pattern; If-Match checks vtags, If-Unmodified-Since checks last-modified; returns 412 on failure; `filter_riak_cond_opts/1` strips HTTP conditionals before Riak put | N/A |
+| CG-004 | P0 | Conditional write enforcement gaps for `If-Match` and `If-Unmodified-Since` | Closed (S2+D01) | Yes | Added `check_write_preconditions/3` with read-before-write pattern; If-Match checks vtags, If-Unmodified-Since checks last-modified; returns 412 on failure; `filter_riak_cond_opts/1` strips HTTP conditionals before Riak put; `if_none_match_option/1` validates only `*` accepted (D01) | N/A |
 | CG-005 | P1 | Query vs mapreduce timeout semantics inconsistent | Closed (S1) | Yes | MapReduce timeout unified to 503; list_keys error mode toggle added (compat/strict) | N/A |
 | CG-006 | P1 | MapReduce backend unavailable path (`501 not_implemented`) may surprise clients in stripped builds | Closed (S2) | Yes | Added `mapred_backend_enabled/0` operator toggle (default `true`); disabled returns 503 `service_unavailable`; absent modules still return 501 `not_implemented`; two-level availability with clear error semantics | N/A |
 | CG-007 | P2 | CRDT default redirect parity scope is partial | Closed (S2) | Yes | Added `maybe_crdt_collection_redirect/1` for collection/create path with default bucket type; returns 301 to `/buckets/.../counters`; keyed and collection redirects now symmetric | N/A |
@@ -37,7 +37,7 @@ Status: Active
 - `CG-001` (`P1`): true incremental streaming via chunked Cowboy transfer with toggle (S2).
 - `CG-002` (`P1`): telemetry error code dimension implemented (D01).
 - `CG-003` (`P0`): cutover misconfiguration now fails closed for invalid per-op modes (D01).
-- `CG-004` (`P0`): conditional-write enforcement for If-Match and If-Unmodified-Since via read-before-write (S2).
+- `CG-004` (`P0`): conditional-write enforcement for If-Match and If-Unmodified-Since via read-before-write (S2); If-None-Match restricted to `*` only (D01).
 - `CG-005` (`P1`): mapred timeout unified to 503 + list_keys error mode toggle (S1).
 - `CG-006` (`P1`): MapReduce backend operator toggle with two-level availability (503 disabled / 501 absent) (S2).
 - `CG-007` (`P2`): CRDT collection redirect parity for default bucket type create path (S2).

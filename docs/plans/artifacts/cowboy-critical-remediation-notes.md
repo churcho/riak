@@ -319,6 +319,7 @@ What changed:
 
 - `check_write_preconditions/3` implements HTTP-layer If-Match and If-Unmodified-Since via read-before-write.
 - Returns 412 on precondition failure. `filter_riak_cond_opts/1` strips HTTP conditionals before Riak put.
+- `if_none_match_option/1` (D01) validates that `If-None-Match` only accepts `*`; entity-tag values return 400 `invalid_if_none_match`.
 
 Why safe:
 

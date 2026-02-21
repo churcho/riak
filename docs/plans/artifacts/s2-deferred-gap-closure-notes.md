@@ -60,7 +60,7 @@ Scope:
 
 What changed:
 
-- **`conditional_put_options/1`**: Now extracts `If-Match` and `If-Unmodified-Since` headers from the request and includes them as `{if_match, Value}` and `{if_unmodified_since, Value}` in the options list.
+- **`conditional_put_options/1`**: Now extracts `If-Match` and `If-Unmodified-Since` headers from the request and includes them as `{if_match, Value}` and `{if_unmodified_since, Value}` in the options list. `If-None-Match` is validated via `if_none_match_option/1` — only `*` is accepted; entity-tag values return `400 invalid_if_none_match` (D01 hardening).
 - **`object_store/4`**: Calls `check_write_preconditions/3` before the actual `riak_client:put/3` call. If preconditions fail, returns `{error, #{status => 412, ...}}`.
 - **`check_write_preconditions/3`**: HTTP-layer conditional enforcement via read-before-write pattern:
   1. Scans options for `if_match` and `if_unmodified_since`.
@@ -76,7 +76,7 @@ Why safe:
 
 - Read-before-write pattern correctly implements HTTP conditional semantics that Riak KV lacks natively.
 - When no conditional headers are present, the hot path is a single options scan — no additional read.
-- Riak's native `if_none_match` and `if_not_modified` continue to work unchanged.
+- Riak's native `if_none_match` and `if_not_modified` continue to be forwarded to `riak_client:put`. The `if_none_match` value is now validated at the HTTP layer (only `*` accepted) before reaching Riak.
 - `filter_riak_cond_opts/1` prevents passing unknown options to Riak.
 
 Verification:
@@ -164,7 +164,7 @@ Verification:
 ## Compatibility Notes
 
 - **CG-001 streaming mode change**: Defaults to incremental streaming. Clients receiving chunked transfer-encoded responses must handle progressive JSON delivery. Toggle `stream_incremental_enabled => false` to revert.
-- **CG-004 conditional writes**: `If-Match` and `If-Unmodified-Since` now enforced with 412 responses. Previously these headers were forwarded but not checked.
+- **CG-004 conditional writes**: `If-Match` and `If-Unmodified-Since` now enforced with 412 responses. Previously these headers were forwarded but not checked. `If-None-Match` now only accepts `*`; entity-tag values (e.g., `"etag-1"`) return 400 `invalid_if_none_match`. Previously any value was silently treated as `{if_none_match, true}`.
 - **CG-006 mapred toggle**: New `mapred_backend_enabled` config (default `true`). When set `false`, mapred returns 503 instead of proceeding.
 - **CG-007 CRDT create redirect**: Default bucket-type CRDT create (POST, no key) now returns 301 to `/buckets/.../counters`. Previously proceeded without redirect.
 - **CG-008**: No behavioral change — `/riak/.../counters/...` was always 404.

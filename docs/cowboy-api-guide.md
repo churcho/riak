@@ -511,7 +511,7 @@ curl -X POST \
 | `X-Riak-Meta-*` | No | User-defined metadata (prefix stripped and stored) |
 | `X-Riak-Index-*` | No | Secondary index entries (comma-separated for multiple values) |
 | `Content-Encoding` | No | Content encoding (stored as metadata) |
-| `If-None-Match` | No | Conditional: only store if key does not exist |
+| `If-None-Match` | No | Conditional: only `*` is accepted (store if key does not exist); entity-tag values return 400 |
 | `X-Riak-If-Not-Modified` | No | Conditional: base64-encoded vclock; store only if object has not been modified |
 
 **Query Parameters:**
