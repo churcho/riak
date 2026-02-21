@@ -26,6 +26,7 @@ Response headers always include:
 
 | HTTP status | Error code | Trigger | Notes |
 |---|---|---|---|
+| `400` | `invalid_if_none_match` | `If-None-Match` header contains entity-tag value instead of `*` | Raised by `riak_admin_api_riak:if_none_match_option/1` (D01) |
 | `400` | `invalid_query` | Query coercion failure (`boolean`, `quorum`, `timeout`) | Raised by `riak_admin_api_request:normalize_query/1` |
 | `401` | `unauthorized` | Authn hook denies request | Hook contract in security policy |
 | `403` | `forbidden` | Authz hook denies request; origin policy failure | Security envelope response |

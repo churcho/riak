@@ -108,7 +108,7 @@ Branch: `feature/cowboy-s2-streaming-conditions-parity`
 | Change | Expected Impact | Risk |
 |---|---|---|
 | Incremental streaming (CG-001) | Positive — reduces peak memory: stream payloads emitted incrementally instead of fully buffered; handler latency spread over chunk emissions rather than single large write | Low-Medium (chunked encoding adds per-chunk framing overhead; negligible for typical payload sizes) |
-| Conditional writes read-before-write (CG-004) | Negative (bounded) — adds one GET before PUT when If-Match or If-Unmodified-Since present; no overhead when headers absent | Low (only fires when conditional headers present; read is local to the coordinator node) |
+| Conditional writes read-before-write (CG-004) | Negative (bounded) — adds one GET before PUT when If-Match or If-Unmodified-Since present; no overhead when headers absent (If-None-Match validation is header-only, no additional I/O) | Low (only fires when conditional headers present; read is local to the coordinator node) |
 | MapReduce backend toggle (CG-006) | Negligible — single app env read added before mapred dispatch | Low |
 | CRDT collection redirect (CG-007) | Negligible — single map pattern match added in create path | Low |
 | /riak counters alias (CG-008) | None — no code change | None |

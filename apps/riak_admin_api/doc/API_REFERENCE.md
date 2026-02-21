@@ -767,7 +767,7 @@ Update an existing object.
 | `X-Riak-Meta-*` | User metadata (prefix stripped and stored) |
 | `X-Riak-Index-*` | Secondary index entries (comma-separated for multi-value) |
 | `Content-Encoding` | Stored alongside the object |
-| `If-None-Match` | Conditional: fail if object exists |
+| `If-None-Match` | Conditional: only `*` is accepted (store if key does not exist); entity-tag values return 400 |
 | `If-Match` | Conditional: fail if ETag does not match current vtag |
 | `If-Unmodified-Since` | Conditional: fail if modified after given date |
 | `X-Riak-If-Not-Modified` | Conditional: base64 vclock, fail if modified |
